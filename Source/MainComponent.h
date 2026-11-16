@@ -15,7 +15,9 @@ public:
         down.setButtonText("v");
         remove.setButtonText("X");
 
-        for (auto* b : { &edit, &bypass, &up, &down, &remove })
+        for (juce::Button* b : { (juce::Button*) &edit, (juce::Button*) &bypass,
+                                 (juce::Button*) &up, (juce::Button*) &down,
+                                 (juce::Button*) &remove })
             addAndMakeVisible(b);
 
         edit.onClick = [this] { engine.openEditor(row); };
