@@ -221,7 +221,6 @@ static OSStatus Device_Property(const AudioObjectPropertyAddress* a, UInt32 qSiz
         case kAudioDevicePropertyDeviceIsAlive: REPLY_VALUE(UInt32, 1);
 
         case kAudioDevicePropertyDeviceIsRunning:
-        case kAudioDevicePropertyDeviceIsRunningSomewhere:
         {
             pthread_mutex_lock(&gStateMutex);
             UInt32 running = gIOClients > 0 ? 1 : 0;
