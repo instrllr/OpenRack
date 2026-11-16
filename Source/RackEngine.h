@@ -170,6 +170,70 @@ public:
     }
 
     //--------------------------------------------------------------------------
+    // Bridge mode (standalone app): takes the rack's input from a virtual audio
+    // device - "OpenRack Bridge" on macOS, or a virtual cable such as VB-Cable
+    // or BlackHole - and sends the output to a real device. A DAW that plays to
+    // the virtual device is then processed by the rack.
+    // Returns an empty string on success, otherwise a message for the user.
+    juce::String useBridgeInput()
+    {
+        if (! ownsDevice)
+            return "Bridge mode is only available in the standalone app.";
+
+        auto* type = deviceManager.getCurrentDeviceTypeObject();
+        if (type == nullptr)
+            return "No audio system is available.";
+
+        type->scanForDevices();
+
+        auto isVirtual = [](const juce::String& n)
+        {
+            return n.containsIgnoreCase("OpenRack Bridge")
+                || n.containsIgnoreCase("CABLE")
+                || n.containsIgnoreCase("BlackHole");
+        };
+
+        // Prefer our own bridge, then VB-Cable, then BlackHole.
+        juce::String bridge;
+        const auto inputs = type->getDeviceNames(true);
+        for (auto* wanted : { "OpenRack Bridge", "CABLE Output", "BlackHole" })
+        {
+            for (auto& n : inputs)
+                if (n.containsIgnoreCase(wanted)) { bridge = n; break; }
+            if (bridge.isNotEmpty())
+                break;
+        }
+
+        if (bridge.isEmpty())
+            return "No bridge device was found.\n\nOn macOS, install the OpenRack Bridge driver. "
+                   "On Windows, install a virtual audio cable such as VB-Cable. Then try again.";
+
+        auto setup = deviceManager.getAudioDeviceSetup();
+        setup.inputDeviceName = bridge;
+        setup.useDefaultInputChannels = true;
+
+        // Never send the output back into a virtual device, or it would feed back on itself.
+        if (setup.outputDeviceName.isEmpty() || isVirtual(setup.outputDeviceName))
+        {
+            const auto outputs = type->getDeviceNames(false);
+            const int def = type->getDefaultDeviceIndex(false);
+            juce::String chosen;
+
+            if (def >= 0 && def < outputs.size() && ! isVirtual(outputs[def]))
+                chosen = outputs[def];
+            else
+                for (auto& n : outputs)
+                    if (! isVirtual(n)) { chosen = n; break; }
+
+            if (chosen.isEmpty())
+                return "No real output device was found to play the processed audio on.";
+            setup.outputDeviceName = chosen;
+        }
+
+        return deviceManager.setAudioDeviceSetup(setup, true);
+    }
+
+    //--------------------------------------------------------------------------
     int getNumSlots() const { return (int) slots.size(); }
     const Slot& getSlot(int i) const { return slots[(size_t) i]; }
 

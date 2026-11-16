@@ -165,15 +165,17 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &saveBtn, &loadBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &bridgeBtn, &saveBtn, &loadBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
+        bridgeBtn.setButtonText("Use Bridge");
         saveBtn.setButtonText("Save rack");
         loadBtn.setButtonText("Load rack");
 
         scanBtn.onClick = [this] { showScanner(); };
         audioBtn.onClick = [this] { showAudioSettings(); };
+        bridgeBtn.onClick = [this] { useBridge(); };
         saveBtn.onClick = [this] { saveRack(); };
         loadBtn.onClick = [this] { loadRack(); };
 
@@ -220,6 +222,7 @@ public:
 
         // As a plugin the DAW owns the audio device, so there is nothing to configure.
         audioBtn.setVisible(engine.ownsAudioDevice());
+        bridgeBtn.setVisible(engine.ownsAudioDevice());
 
         rebuildFilter();
         timerCallback();
@@ -314,7 +317,7 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &saveBtn, &bridgeBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
@@ -548,6 +551,16 @@ private:
         o.launchAsync();
     }
 
+    void useBridge()
+    {
+        const juce::String error = engine.useBridgeInput();
+
+        if (error.isNotEmpty())
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                                   "OpenRack Bridge", error);
+        timerCallback();    // refresh the status bar with the new device
+    }
+
     void showAudioSettings()
     {
         auto* c = new Themed<juce::AudioDeviceSelectorComponent>(engine.deviceManager, 0, 2, 0, 2,
@@ -609,7 +622,7 @@ private:
     int totalEffects = 0;
     juce::ListBox pluginList, rackList;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, saveBtn, loadBtn;
+    juce::TextButton scanBtn, audioBtn, bridgeBtn, saveBtn, loadBtn;
     juce::Slider gainSlider;
     juce::Label gainLabel, pluginTitle, rackTitle;
     juce::Rectangle<int> pluginPanel, rackPanel, statusBar;

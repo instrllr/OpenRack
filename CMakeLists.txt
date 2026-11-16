@@ -74,3 +74,19 @@ target_link_libraries(OpenRackPlugin PRIVATE
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+#------------------------------------------------------------------------------
+# OpenRack Bridge: a virtual audio device driver for macOS (CoreAudio
+# AudioServerPlugIn). Install the built OpenRackBridge.driver into
+# /Library/Audio/Plug-Ins/HAL/ and restart coreaudiod.
+if(APPLE)
+    add_library(OpenRackBridge MODULE Driver/OpenRackBridge.c)
+    set_target_properties(OpenRackBridge PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION driver
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Driver/Info.plist"
+        C_STANDARD 11)
+    target_link_libraries(OpenRackBridge PRIVATE
+        "-framework CoreAudio"
+        "-framework CoreFoundation")
+endif()
