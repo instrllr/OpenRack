@@ -131,6 +131,56 @@ jobs:
           $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Select-Object -First 1
           Compress-Archive -Path $vst3.FullName -DestinationPath OpenRack-VST3-Windows.zip
 
+      # Validate the plugins the way DAWs do. These report results but do not
+      # block the build, so a validation finding never hides the build outputs.
+      - name: Validate AU with auval (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          AU=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.component | head -1)
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "$AU" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 5
+          echo "--- registered OpenRack components"
+          auval -a 2>&1 | grep -i "orak\|openrack" || echo "(not listed)"
+          echo "--- auval"
+          auval -v aufx Orak Orck 2>&1 | tee auval.txt
+          grep -q "AU VALIDATION SUCCEEDED" auval.txt
+
+      - name: Validate VST3 with pluginval (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --validate-in-process \
+            --timeout-ms 120000 "$VST3" 2>&1 | tee pluginval.txt
+
+      - name: Validate VST3 with pluginval (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb libcurl4-openssl-dev
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Linux.zip
+          unzip -q pluginval.zip
+          chmod +x pluginval
+          xvfb-run -a ./pluginval --strictness-level 5 --validate-in-process \
+            --timeout-ms 120000 "$VST3" 2>&1 | tee pluginval.txt
+
+      - name: Validate VST3 with pluginval (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Select-Object -First 1
+          Invoke-WebRequest -Uri https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pv
+          & ./pv/pluginval.exe --strictness-level 5 --validate-in-process --timeout-ms 120000 $vst3.FullName 2>&1 | Tee-Object -FilePath pluginval.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:

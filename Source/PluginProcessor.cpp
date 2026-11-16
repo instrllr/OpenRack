@@ -100,8 +100,11 @@ OpenRackEditor::OpenRackEditor(OpenRackProcessor& p) : AudioProcessorEditor(&p)
     content = std::make_unique<MainComponent>(p.getEngine());
     addAndMakeVisible(*content);
 
+    // Plugin editors shown inside OpenRack can be large, so allow generous sizes.
+    content->onRequestSize = [this](int w, int h) { setSize(w, h); };
+
     setResizable(true, true);
-    setResizeLimits(800, 500, 2000, 1200);
+    setResizeLimits(800, 500, 4000, 3000);
     setSize(960, 620);
 }
 

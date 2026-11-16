@@ -139,11 +139,106 @@ private:
 };
 
 //==============================================================================
+// Shows one hosted plugin's own interface inside OpenRack's window, under a
+// "Back to rack" bar. Used when running inside a DAW, so plugin windows can
+// never end up hidden behind the DAW.
+class InlineEditorHost : public juce::Component,
+                         private juce::ComponentListener
+{
+public:
+    std::function<void()> onBack;
+    std::function<void(int, int)> onWantedSize;   // window size the editor needs
+
+    InlineEditorHost()
+    {
+        backBtn.setButtonText("< Back to rack");
+        backBtn.onClick = [this] { if (onBack) onBack(); };
+        addAndMakeVisible(backBtn);
+
+        title.setFont(juce::Font(juce::FontOptions(16.0f, juce::Font::bold)));
+        title.setColour(juce::Label::textColourId, Theme::text());
+        addAndMakeVisible(title);
+    }
+
+    ~InlineEditorHost() override { clear(); }
+
+    void show(juce::AudioProcessor& p, const juce::String& name)
+    {
+        clear();
+
+        juce::AudioProcessorEditor* ed = p.hasEditor() ? p.createEditorIfNeeded() : nullptr;
+        if (ed == nullptr)
+            ed = new juce::GenericAudioProcessorEditor(p);
+
+        editor.reset(ed);
+        title.setText(name, juce::dontSendNotification);
+        addAndMakeVisible(*editor);
+        editor->addComponentListener(this);
+
+        layoutEditor();
+        notifyWantedSize();
+    }
+
+    void clear()
+    {
+        if (editor != nullptr)
+        {
+            editor->removeComponentListener(this);
+            removeChildComponent(editor.get());
+            editor.reset();
+        }
+    }
+
+    void paint(juce::Graphics& g) override { g.fillAll(Theme::background()); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(16);
+        auto top = r.removeFromTop(36);
+        backBtn.setBounds(top.removeFromLeft(140));
+        title.setBounds(top.reduced(14, 0));
+        r.removeFromTop(12);
+        area = r;
+        layoutEditor();
+    }
+
+private:
+    void layoutEditor()
+    {
+        if (editor != nullptr)
+            editor->setTopLeftPosition(juce::jmax(0, area.getCentreX() - editor->getWidth() / 2), area.getY());
+    }
+
+    void notifyWantedSize()
+    {
+        if (editor != nullptr && onWantedSize)
+            onWantedSize(editor->getWidth() + 32, editor->getHeight() + 32 + 36 + 12);
+    }
+
+    void componentMovedOrResized(juce::Component&, bool, bool wasResized) override
+    {
+        if (wasResized)
+        {
+            layoutEditor();
+            notifyWantedSize();
+        }
+    }
+
+    juce::TextButton backBtn;
+    juce::Label title;
+    juce::Rectangle<int> area;
+    std::unique_ptr<juce::AudioProcessorEditor> editor;
+};
+
+//==============================================================================
 class MainComponent : public juce::Component,
                       private juce::ChangeListener,
                       private juce::Timer
 {
 public:
+    // Set by the plugin window so the editor view can ask the DAW for more room.
+    std::function<void(int, int)> onRequestSize;
+
     explicit MainComponent(RackEngine& e) : engine(e), rackModel(*this), pluginModel(*this)
     {
         auto dataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -224,6 +319,22 @@ public:
         audioBtn.setVisible(engine.ownsAudioDevice());
         bridgeBtn.setVisible(engine.ownsAudioDevice());
 
+        // Inline plugin editors (used when running inside a DAW).
+        addChildComponent(editorHost);
+        editorHost.onBack = [this] { closeInlineEditor(true); };
+        editorHost.onWantedSize = [this](int w, int h)
+        {
+            if (onRequestSize)
+                onRequestSize(juce::jmax(960, w), juce::jmax(620, h));
+        };
+        if (! engine.ownsAudioDevice())
+            engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
+        engine.onBeforeSlotRemoved = [this](juce::uint32 uid)
+        {
+            if (inlineNode == uid)
+                closeInlineEditor(false);
+        };
+
         rebuildFilter();
         timerCallback();
         startTimerHz(2);
@@ -233,6 +344,9 @@ public:
     ~MainComponent() override
     {
         stopTimer();
+        engine.onOpenEditorRequested = nullptr;
+        engine.onBeforeSlotRemoved = nullptr;
+        editorHost.clear();
         engine.onChanged = nullptr;
         engine.knownPlugins.removeChangeListener(this);
     }
@@ -302,6 +416,10 @@ public:
 
     void paintOverChildren(juce::Graphics& g) override
     {
+        if (editorHost.isVisible())
+            return;
+
+
         // Magnifier icon inside the search box
         auto b = searchBox.getBounds().toFloat();
         const float cx = b.getX() + 17.0f;
@@ -314,6 +432,8 @@ public:
 
     void resized() override
     {
+        editorHost.setBounds(getLocalBounds());
+
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
@@ -551,6 +671,38 @@ private:
         o.launchAsync();
     }
 
+    void showInlineEditor(int row)
+    {
+        if (row < 0 || row >= engine.getNumSlots())
+            return;
+
+        if (! editorHost.isVisible())
+        {
+            preEditorW = getWidth();
+            preEditorH = getHeight();
+        }
+
+        auto& slot = engine.getSlot(row);
+        inlineNode = slot.node->nodeID.uid;
+        editorHost.setBounds(getLocalBounds());
+        editorHost.show(*slot.node->getProcessor(), slot.desc.name);
+        editorHost.setVisible(true);
+        editorHost.toFront(false);
+    }
+
+    // restoreSize: put the window back to its size from before the editor opened.
+    void closeInlineEditor(bool restoreSize)
+    {
+        const bool wasOpen = editorHost.isVisible();
+        editorHost.clear();
+        editorHost.setVisible(false);
+        inlineNode = 0;
+        repaint();
+
+        if (wasOpen && restoreSize && onRequestSize)
+            onRequestSize(preEditorW, preEditorH);
+    }
+
     void useBridge()
     {
         const juce::String error = engine.useBridgeInput();
@@ -627,6 +779,9 @@ private:
     juce::Label gainLabel, pluginTitle, rackTitle;
     juce::Rectangle<int> pluginPanel, rackPanel, statusBar;
     juce::String statusText;
+    InlineEditorHost editorHost;
+    juce::uint32 inlineNode = 0;
+    int preEditorW = 960, preEditorH = 620;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
 

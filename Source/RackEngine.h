@@ -95,6 +95,8 @@ public:
     juce::AudioDeviceManager deviceManager;     // only used when ownsAudioDevice
     std::function<void()> onChanged;            // rack contents changed (message thread)
     std::function<void()> onLatencyChanged;     // total latency may have changed
+    std::function<void(int)> onOpenEditorRequested;           // plugin mode: show a slot's editor inline
+    std::function<void(juce::uint32)> onBeforeSlotRemoved;    // a hosted plugin is about to be deleted
 
     explicit RackEngine(bool ownsAudioDevice = true) : ownsDevice(ownsAudioDevice)
     {
@@ -297,6 +299,7 @@ public:
     {
         if (i < 0 || i >= getNumSlots()) return;
         auto id = slots[(size_t) i].node->nodeID;
+        if (onBeforeSlotRemoved) onBeforeSlotRemoved(id.uid);   // let the UI close its editor first
         windows.erase(id.uid);
         graph.removeNode(id);
         slots.erase(slots.begin() + i);
@@ -325,6 +328,14 @@ public:
     void openEditor(int i)
     {
         if (i < 0 || i >= getNumSlots()) return;
+
+        // Inside a DAW the editor is shown within OpenRack's own window instead.
+        if (onOpenEditorRequested)
+        {
+            onOpenEditorRequested(i);
+            return;
+        }
+
         auto node = slots[(size_t) i].node;
         auto uid = node->nodeID.uid;
 
