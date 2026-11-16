@@ -44,7 +44,12 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           APP=$(find build/OpenRack_artefacts -maxdepth 3 -name OpenRack.app | head -1)
+          codesign --force --deep --sign - "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" OpenRack-macOS.zip
+          mkdir -p pkgroot/Applications
+          cp -R "$APP" pkgroot/Applications/
+          pkgbuild --root pkgroot --identifier com.openrack.OpenRack \
+            --version 0.1.0 --install-location / OpenRack-macOS.pkg
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -60,5 +65,6 @@ jobs:
           path: |
             OpenRack-Linux.tar.gz
             OpenRack-macOS.zip
+            OpenRack-macOS.pkg
             OpenRack-Windows.zip
           if-no-files-found: error
