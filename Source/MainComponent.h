@@ -88,7 +88,8 @@ public:
 
         engine.onChanged = [this]
         {
-            juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)]
+            juce::Component::SafePointer<MainComponent> safe(this);
+            juce::MessageManager::callAsync([safe]
             {
                 if (safe != nullptr) safe->refresh();
             });
