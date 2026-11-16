@@ -49,6 +49,21 @@ public:
         setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
 
         setColour(juce::Label::textColourId, Theme::text());
+
+        // Controls used by the audio settings and plugin scanner dialogs
+        setColour(juce::ResizableWindow::backgroundColourId, Theme::background());
+        setColour(juce::ListBox::textColourId, Theme::text());
+        setColour(juce::ComboBox::backgroundColourId, Theme::control());
+        setColour(juce::ComboBox::textColourId, Theme::text());
+        setColour(juce::ComboBox::outlineColourId, Theme::outline());
+        setColour(juce::ComboBox::arrowColourId, Theme::muted());
+        setColour(juce::PopupMenu::backgroundColourId, Theme::panel());
+        setColour(juce::PopupMenu::textColourId, Theme::text());
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, Theme::accent());
+        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+        setColour(juce::ToggleButton::textColourId, Theme::text());
+        setColour(juce::ToggleButton::tickColourId, Theme::accent());
+        setColour(juce::ToggleButton::tickDisabledColourId, Theme::muted());
     }
 
     void drawButtonBackground(juce::Graphics& g, juce::Button& button,

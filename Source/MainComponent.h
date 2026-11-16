@@ -378,6 +378,7 @@ private:
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned(c);
         o.dialogTitle = "Plugin scanner";
+        o.dialogBackgroundColour = Theme::background();
         o.componentToCentreAround = this;
         o.escapeKeyTriggersCloseButton = true;
         o.useNativeTitleBar = true;
@@ -394,6 +395,7 @@ private:
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned(c);
         o.dialogTitle = "Audio settings";
+        o.dialogBackgroundColour = Theme::background();
         o.componentToCentreAround = this;
         o.escapeKeyTriggersCloseButton = true;
         o.useNativeTitleBar = true;
