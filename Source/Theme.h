@@ -14,6 +14,13 @@ namespace Theme
     inline juce::Colour muted()      { return juce::Colour(0xff8a92a6); }
     inline juce::Colour accent()     { return juce::Colour(0xff4f8cff); }
     inline juce::Colour warning()    { return juce::Colour(0xffffa94d); }
+
+    // A stable colour per plugin name, so a plugin looks the same everywhere.
+    inline juce::Colour tint(const juce::String& s)
+    {
+        const float hue = (float) (s.hashCode() & 0xffff) / 65535.0f;
+        return juce::Colour::fromHSV(hue, 0.55f, 0.95f, 1.0f);
+    }
 }
 
 //==============================================================================

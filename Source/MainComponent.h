@@ -4,7 +4,58 @@
 #include "Theme.h"
 
 //==============================================================================
-// One row in the rack list: name + Edit / Bypass / Up / Down / Remove.
+// Stereo output meter with smooth fall-off.
+class LevelMeter : public juce::Component,
+                   private juce::Timer
+{
+public:
+    explicit LevelMeter(RackEngine& e) : engine(e) { startTimerHz(30); }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto area = getLocalBounds().toFloat();
+        const float gap = 3.0f;
+        const float barH = (area.getHeight() - gap) / 2.0f;
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto bar = juce::Rectangle<float>(area.getX(), area.getY() + (float) ch * (barH + gap),
+                                              area.getWidth(), barH);
+            g.setColour(Theme::control());
+            g.fillRoundedRectangle(bar, barH * 0.5f);
+
+            const float frac = toFraction(level[ch]);
+            if (frac > 0.0f)
+            {
+                juce::ColourGradient grad(juce::Colour(0xff3ddc84), bar.getX(), 0.0f,
+                                          juce::Colour(0xffff5252), bar.getRight(), 0.0f, false);
+                grad.addColour(0.7, Theme::warning());
+                g.setGradientFill(grad);
+                g.fillRoundedRectangle(bar.withWidth(juce::jmax(barH, bar.getWidth() * frac)), barH * 0.5f);
+            }
+        }
+    }
+
+private:
+    static float toFraction(float gain)
+    {
+        const float db = juce::Decibels::gainToDecibels(gain, -60.0f);
+        return juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 66.0f); // -60 dB .. +6 dB
+    }
+
+    void timerCallback() override
+    {
+        for (int ch = 0; ch < 2; ++ch)
+            level[ch] = juce::jmax(engine.takeOutputPeak(ch), level[ch] * 0.90f);
+        repaint();
+    }
+
+    RackEngine& engine;
+    float level[2] { 0.0f, 0.0f };
+};
+
+//==============================================================================
+// One row in the rack list: number + name + Edit / Bypass / Up / Down / Remove.
 class SlotRow : public juce::Component
 {
 public:
@@ -43,11 +94,18 @@ public:
     void paint(juce::Graphics& g) override
     {
         const bool bypassed = bypass.getToggleState();
-        const int textX = 20;
+        const int textX = 50;
         const int textW = juce::jmax(40, edit.getX() - textX - 8);
 
-        g.setColour(bypassed ? Theme::muted() : Theme::accent());
+        // Colour bar, tinted per plugin
+        g.setColour(bypassed ? Theme::muted() : Theme::tint(name));
         g.fillRoundedRectangle(8.0f, 12.0f, 4.0f, (float) getHeight() - 24.0f, 2.0f);
+
+        // Slot number
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText(juce::String(row + 1).paddedLeft('0', 2), 18, 0, 26, getHeight(),
+                   juce::Justification::centred);
 
         g.setColour(bypassed ? Theme::muted() : Theme::text());
         g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
@@ -82,7 +140,8 @@ private:
 
 //==============================================================================
 class MainComponent : public juce::Component,
-                      private juce::ChangeListener
+                      private juce::ChangeListener,
+                      private juce::Timer
 {
 public:
     MainComponent() : rackModel(*this), pluginModel(*this)
@@ -121,7 +180,7 @@ public:
         // Plugin search
         searchBox.setTextToShowWhenEmpty("Search plugins by name, maker or type...", Theme::muted());
         searchBox.setFont(juce::Font(juce::FontOptions(15.0f)));
-        searchBox.setIndents(10, 0);
+        searchBox.setIndents(34, 0);
         searchBox.setSelectAllWhenFocused(true);
         searchBox.onTextChange = [this] { refresh(); };
         searchBox.onEscapeKey = [this] { searchBox.setText("", true); };
@@ -155,35 +214,55 @@ public:
             engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
         };
         addAndMakeVisible(gainSlider);
+        addAndMakeVisible(meter);
 
         rebuildFilter();
-        setSize(960, 600);
+        timerCallback();
+        startTimerHz(2);
+        setSize(960, 620);
     }
 
     ~MainComponent() override
     {
+        stopTimer();
         engine.onChanged = nullptr;
         engine.knownPlugins.removeChangeListener(this);
     }
 
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(Theme::background());
+        const float w = (float) getWidth();
+
+        // Background gradient
+        g.setGradientFill(juce::ColourGradient(Theme::background().brighter(0.08f), 0.0f, 0.0f,
+                                               Theme::background().darker(0.4f), 0.0f, (float) getHeight(),
+                                               false));
+        g.fillAll();
 
         // Title
         g.setColour(Theme::accent());
         g.fillRoundedRectangle(16.0f, 17.0f, 6.0f, 26.0f, 3.0f);
         g.setColour(Theme::text());
         g.setFont(juce::FontOptions(24.0f, juce::Font::bold));
-        g.drawText("OpenRack", 32, 12, 220, 36, juce::Justification::centredLeft);
+        g.drawText("OpenRack", 32, 12, 130, 36, juce::Justification::centredLeft);
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(13.0f));
+        g.drawText("live plugin host", 166, 17, 160, 26, juce::Justification::centredLeft);
+
+        // Glowing header line
+        g.setGradientFill(juce::ColourGradient(Theme::accent().withAlpha(0.7f), 16.0f, 0.0f,
+                                               Theme::accent().withAlpha(0.0f), w - 16.0f, 0.0f, false));
+        g.fillRect(juce::Rectangle<float>(16.0f, 56.0f, w - 32.0f, 1.5f));
 
         // Panels behind the two lists
         for (auto* panel : { &pluginPanel, &rackPanel })
         {
-            g.setColour(Theme::panel());
-            g.fillRoundedRectangle(panel->toFloat(), 10.0f);
+            auto p = panel->toFloat();
+            g.setGradientFill(juce::ColourGradient(Theme::panel().brighter(0.06f), 0.0f, p.getY(),
+                                                   Theme::panel(), 0.0f, p.getBottom(), false));
+            g.fillRoundedRectangle(p, 10.0f);
             g.setColour(Theme::outline());
-            g.drawRoundedRectangle(panel->toFloat().reduced(0.5f), 10.0f, 1.0f);
+            g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
         }
 
         // Empty-state hints
@@ -202,6 +281,26 @@ public:
             g.drawFittedText("The rack is empty.\nDouble-click a plugin on the left, "
                              "or press Enter in the search box, to add it.",
                              rackPanel.reduced(30), juce::Justification::centred, 4);
+
+        // Status bar
+        const bool hasDevice = engine.deviceManager.getCurrentAudioDevice() != nullptr;
+        g.setColour(hasDevice ? juce::Colour(0xff3ddc84) : Theme::warning());
+        g.fillEllipse((float) statusBar.getX() + 2.0f, (float) statusBar.getCentreY() - 3.0f, 7.0f, 7.0f);
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText(statusText, statusBar.withTrimmedLeft(18), juce::Justification::centredLeft, true);
+    }
+
+    void paintOverChildren(juce::Graphics& g) override
+    {
+        // Magnifier icon inside the search box
+        auto b = searchBox.getBounds().toFloat();
+        const float cx = b.getX() + 17.0f;
+        const float cy = b.getCentreY() - 1.0f;
+
+        g.setColour(Theme::muted());
+        g.drawEllipse(cx - 5.5f, cy - 5.5f, 11.0f, 11.0f, 1.7f);
+        g.drawLine(cx + 3.5f, cy + 3.5f, cx + 8.0f, cy + 8.0f, 1.9f);
     }
 
     void resized() override
@@ -212,11 +311,16 @@ public:
         for (auto* b : { &loadBtn, &saveBtn, &audioBtn, &scanBtn })
             b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
-        r.removeFromTop(12);
+        r.removeFromTop(16);
+
+        statusBar = r.removeFromBottom(20);
+        r.removeFromBottom(8);
 
         auto bottom = r.removeFromBottom(34);
         r.removeFromBottom(12);
         gainLabel.setBounds(bottom.removeFromLeft(70));
+        meter.setBounds(bottom.removeFromRight(190).reduced(0, 6));
+        bottom.removeFromRight(16);
         gainSlider.setBounds(bottom);
 
         auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
@@ -281,6 +385,11 @@ private:
 
             auto& d = owner.filtered[(size_t) row];
             auto area = juce::Rectangle<int>(0, 0, w, h).reduced(10, 0);
+
+            // Colour dot matching the plugin's colour in the rack
+            g.setColour(Theme::tint(d.name));
+            g.fillEllipse((float) area.getX(), (float) h * 0.5f - 3.5f, 7.0f, 7.0f);
+            area.removeFromLeft(16);
 
             g.setColour(Theme::text());
             g.setFont(juce::FontOptions(14.0f));
@@ -369,6 +478,34 @@ private:
         refresh();
     }
 
+    // Twice a second: refresh the audio device / CPU line in the status bar.
+    void timerCallback() override
+    {
+        juce::String s;
+        if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
+        {
+            const double sr = dev->getCurrentSampleRate();
+            const int bs = dev->getCurrentBufferSizeSamples();
+            const double ms = sr > 0.0 ? 1000.0 * (double) bs / sr : 0.0;
+            const int cpu = juce::roundToInt(engine.deviceManager.getCpuUsage() * 100.0);
+
+            s = dev->getTypeName() + "  -  " + dev->getName()
+                + "      " + juce::String((int) sr) + " Hz"
+                + "      " + juce::String(bs) + " samples (" + juce::String(ms, 1) + " ms)"
+                + "      CPU " + juce::String(cpu) + "%";
+        }
+        else
+        {
+            s = "No audio device - open Audio settings";
+        }
+
+        if (s != statusText)
+        {
+            statusText = s;
+            repaint(statusBar);
+        }
+    }
+
     void showScanner()
     {
         auto* c = new juce::PluginListComponent(engine.formatManager, engine.knownPlugins,
@@ -440,6 +577,7 @@ private:
 
     //--------------------------------------------------------------------------
     RackEngine engine;
+    LevelMeter meter { engine };
     RackModel rackModel;
     PluginModel pluginModel;
     std::vector<juce::PluginDescription> filtered;
@@ -448,7 +586,8 @@ private:
     juce::TextButton scanBtn, audioBtn, saveBtn, loadBtn;
     juce::Slider gainSlider;
     juce::Label gainLabel, pluginTitle, rackTitle;
-    juce::Rectangle<int> pluginPanel, rackPanel;
+    juce::Rectangle<int> pluginPanel, rackPanel, statusBar;
+    juce::String statusText;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
 

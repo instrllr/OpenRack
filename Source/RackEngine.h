@@ -16,7 +16,15 @@ public:
     const juce::String getName() const override { return "Master"; }
     void prepareToPlay(double, int) override {}
     void releaseResources() override {}
-    void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&) override { b.applyGain(gain.load()); }
+    void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&) override
+    {
+        b.applyGain(gain.load());
+
+        // Track output peaks for the level meter (read and reset by the UI).
+        const int n = b.getNumSamples();
+        if (b.getNumChannels() > 0) updatePeak(peakL, b.getMagnitude(0, 0, n));
+        if (b.getNumChannels() > 1) updatePeak(peakR, b.getMagnitude(1, 0, n));
+    }
     double getTailLengthSeconds() const override { return 0.0; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
@@ -31,6 +39,15 @@ public:
     void setStateInformation(const void*, int) override {}
 
     std::atomic<float> gain { 1.0f };
+    std::atomic<float> peakL { 0.0f };
+    std::atomic<float> peakR { 0.0f };
+
+private:
+    static void updatePeak(std::atomic<float>& a, float v)
+    {
+        if (v > a.load(std::memory_order_relaxed))
+            a.store(v, std::memory_order_relaxed);
+    }
 };
 
 //==============================================================================
@@ -105,6 +122,13 @@ public:
 
     float getMasterGain() const { return gainProc().gain.load(); }
     void setMasterGain(float g) { gainProc().gain.store(g); }
+
+    // Peak output level since the last call (0..1+), for the level meter.
+    float takeOutputPeak(int channel)
+    {
+        auto& p = (channel == 0) ? gainProc().peakL : gainProc().peakR;
+        return p.exchange(0.0f);
+    }
 
     //--------------------------------------------------------------------------
     // Adds a plugin to the end of the chain. `done` gets an empty string on success.
