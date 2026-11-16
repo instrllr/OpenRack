@@ -7,15 +7,24 @@ public:
     const juce::String getApplicationVersion() override { return "0.1.0"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise(const juce::String&) override { mainWindow = std::make_unique<MainWindow>(getApplicationName()); }
-    void shutdown() override { mainWindow = nullptr; }
+    void initialise(const juce::String&) override
+    {
+        juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
+        mainWindow = std::make_unique<MainWindow>(getApplicationName());
+    }
+
+    void shutdown() override
+    {
+        mainWindow = nullptr;
+        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
+    }
     void systemRequestedQuit() override { quit(); }
 
     class MainWindow : public juce::DocumentWindow
     {
     public:
         explicit MainWindow(const juce::String& name)
-            : DocumentWindow(name, juce::Colour(0xff1e1f22), DocumentWindow::allButtons)
+            : DocumentWindow(name, Theme::background(), DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
             setContentOwned(new MainComponent(), true);
@@ -31,6 +40,7 @@ public:
     };
 
 private:
+    OpenRackLookAndFeel lookAndFeel;
     std::unique_ptr<MainWindow> mainWindow;
 };
 

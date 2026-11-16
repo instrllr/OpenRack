@@ -1,5 +1,7 @@
 #pragma once
+#include <algorithm>
 #include "RackEngine.h"
+#include "Theme.h"
 
 //==============================================================================
 // One row in the rack list: name + Edit / Bypass / Up / Down / Remove.
@@ -15,9 +17,7 @@ public:
         down.setButtonText("v");
         remove.setButtonText("X");
 
-        for (juce::Button* b : { (juce::Button*) &edit, (juce::Button*) &bypass,
-                                 (juce::Button*) &up, (juce::Button*) &down,
-                                 (juce::Button*) &remove })
+        for (auto* b : { &edit, &bypass, &up, &down, &remove })
             addAndMakeVisible(b);
 
         edit.onClick = [this] { engine.openEditor(row); };
@@ -34,7 +34,7 @@ public:
         {
             auto& s = engine.getSlot(r);
             name = s.desc.name;
-            maker = s.desc.manufacturerName;
+            details = s.desc.manufacturerName + "  -  " + s.desc.pluginFormatName;
             bypass.setToggleState(s.node->isBypassed(), juce::dontSendNotification);
         }
         repaint();
@@ -42,31 +42,42 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(bypass.getToggleState() ? juce::Colours::grey : juce::Colours::white);
+        const bool bypassed = bypass.getToggleState();
+        const int textX = 20;
+        const int textW = juce::jmax(40, edit.getX() - textX - 8);
+
+        g.setColour(bypassed ? Theme::muted() : Theme::accent());
+        g.fillRoundedRectangle(8.0f, 12.0f, 4.0f, (float) getHeight() - 24.0f, 2.0f);
+
+        g.setColour(bypassed ? Theme::muted() : Theme::text());
         g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-        g.drawText(name, 8, 2, getWidth() - 260, getHeight() / 2, juce::Justification::centredLeft);
-        g.setColour(juce::Colours::grey);
+        g.drawText(name, textX, 6, textW, getHeight() / 2 - 4, juce::Justification::centredLeft, true);
+
+        g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText(maker, 8, getHeight() / 2, getWidth() - 260, getHeight() / 2 - 2,
-                   juce::Justification::centredLeft);
+        g.drawText(details, textX, getHeight() / 2, textW, getHeight() / 2 - 6,
+                   juce::Justification::centredLeft, true);
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(2);
-        remove.setBounds(r.removeFromRight(30));
-        down.setBounds(r.removeFromRight(30));
-        up.setBounds(r.removeFromRight(30));
-        bypass.setBounds(r.removeFromRight(70));
-        edit.setBounds(r.removeFromRight(50));
+        auto r = getLocalBounds().reduced(8, 11);
+        remove.setBounds(r.removeFromRight(28));
+        r.removeFromRight(4);
+        down.setBounds(r.removeFromRight(28));
+        r.removeFromRight(4);
+        up.setBounds(r.removeFromRight(28));
+        r.removeFromRight(10);
+        bypass.setBounds(r.removeFromRight(68));
+        r.removeFromRight(4);
+        edit.setBounds(r.removeFromRight(48));
     }
 
 private:
     RackEngine& engine;
     int row = 0;
-    juce::String name, maker;
-    juce::TextButton edit, up, down, remove;
-    juce::ToggleButton bypass;
+    juce::String name, details;
+    juce::TextButton edit, bypass, up, down, remove;
 };
 
 //==============================================================================
@@ -107,21 +118,36 @@ public:
         saveBtn.onClick = [this] { saveRack(); };
         loadBtn.onClick = [this] { loadRack(); };
 
+        // Plugin search
+        searchBox.setTextToShowWhenEmpty("Search plugins by name, maker or type...", Theme::muted());
+        searchBox.setFont(juce::Font(juce::FontOptions(15.0f)));
+        searchBox.setIndents(10, 0);
+        searchBox.setSelectAllWhenFocused(true);
+        searchBox.onTextChange = [this] { refresh(); };
+        searchBox.onEscapeKey = [this] { searchBox.setText("", true); };
+        searchBox.onReturnKey = [this] { addFromSearch(); };
+        addAndMakeVisible(searchBox);
+
         pluginList.setModel(&pluginModel);
         rackList.setModel(&rackModel);
-        rackList.setRowHeight(44);
-        pluginList.setRowHeight(24);
+        rackList.setRowHeight(52);
+        pluginList.setRowHeight(30);
         addAndMakeVisible(pluginList);
         addAndMakeVisible(rackList);
 
-        addAndMakeVisible(pluginTitle);
-        addAndMakeVisible(rackTitle);
-        pluginTitle.setText("Plugins (double-click to add)", juce::dontSendNotification);
-        rackTitle.setText("Rack (signal flows top to bottom)", juce::dontSendNotification);
+        for (auto* l : { &pluginTitle, &rackTitle, &gainLabel })
+        {
+            l->setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
+            l->setColour(juce::Label::textColourId, Theme::muted());
+            addAndMakeVisible(l);
+        }
+        rackTitle.setText("RACK  -  signal flows top to bottom", juce::dontSendNotification);
+        gainLabel.setText("MASTER", juce::dontSendNotification);
 
         gainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         gainSlider.setRange(-60.0, 12.0, 0.1);
         gainSlider.setValue(0.0, juce::dontSendNotification);
+        gainSlider.setDoubleClickReturnValue(true, 0.0);
         gainSlider.setTextValueSuffix(" dB");
         gainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
         gainSlider.onValueChange = [this]
@@ -129,10 +155,9 @@ public:
             engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
         };
         addAndMakeVisible(gainSlider);
-        addAndMakeVisible(gainLabel);
-        gainLabel.setText("Master", juce::dontSendNotification);
 
-        setSize(900, 560);
+        rebuildFilter();
+        setSize(960, 600);
     }
 
     ~MainComponent() override
@@ -141,26 +166,72 @@ public:
         engine.knownPlugins.removeChangeListener(this);
     }
 
-    void paint(juce::Graphics& g) override { g.fillAll(juce::Colour(0xff1e1f22)); }
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(Theme::background());
+
+        // Title
+        g.setColour(Theme::accent());
+        g.fillRoundedRectangle(16.0f, 17.0f, 6.0f, 26.0f, 3.0f);
+        g.setColour(Theme::text());
+        g.setFont(juce::FontOptions(24.0f, juce::Font::bold));
+        g.drawText("OpenRack", 32, 12, 220, 36, juce::Justification::centredLeft);
+
+        // Panels behind the two lists
+        for (auto* panel : { &pluginPanel, &rackPanel })
+        {
+            g.setColour(Theme::panel());
+            g.fillRoundedRectangle(panel->toFloat(), 10.0f);
+            g.setColour(Theme::outline());
+            g.drawRoundedRectangle(panel->toFloat().reduced(0.5f), 10.0f, 1.0f);
+        }
+
+        // Empty-state hints
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(14.0f));
+
+        if (filtered.empty())
+        {
+            const bool noPlugins = engine.knownPlugins.getNumTypes() == 0;
+            g.drawFittedText(noPlugins ? "No plugins yet.\nClick \"Scan plugins\" to find your VST3 plugins."
+                                       : "No plugins match your search.",
+                             pluginPanel.reduced(24), juce::Justification::centred, 3);
+        }
+
+        if (engine.getNumSlots() == 0)
+            g.drawFittedText("The rack is empty.\nDouble-click a plugin on the left, "
+                             "or press Enter in the search box, to add it.",
+                             rackPanel.reduced(30), juce::Justification::centred, 4);
+    }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(8);
-        auto top = r.removeFromTop(30);
-        for (auto* b : { &scanBtn, &audioBtn, &saveBtn, &loadBtn })
-            b->setBounds(top.removeFromLeft(120).reduced(2));
+        auto r = getLocalBounds().reduced(16);
 
-        auto bottom = r.removeFromBottom(30);
-        gainLabel.setBounds(bottom.removeFromLeft(60));
+        auto top = r.removeFromTop(40);
+        for (auto* b : { &loadBtn, &saveBtn, &audioBtn, &scanBtn })
+            b->setBounds(top.removeFromRight(116).reduced(3, 3));
+
+        r.removeFromTop(12);
+
+        auto bottom = r.removeFromBottom(34);
+        r.removeFromBottom(12);
+        gainLabel.setBounds(bottom.removeFromLeft(70));
         gainSlider.setBounds(bottom);
 
-        r.removeFromTop(6);
         auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
-        pluginTitle.setBounds(left.removeFromTop(22));
-        pluginList.setBounds(left);
-        r.removeFromLeft(8);
-        rackTitle.setBounds(r.removeFromTop(22));
-        rackList.setBounds(r);
+        r.removeFromLeft(16);
+
+        pluginTitle.setBounds(left.removeFromTop(24));
+        searchBox.setBounds(left.removeFromTop(32));
+        left.removeFromTop(8);
+        pluginPanel = left;
+        pluginList.setBounds(left.reduced(6));
+
+        rackTitle.setBounds(r.removeFromTop(24));
+        r.removeFromTop(40);
+        rackPanel = r;
+        rackList.setBounds(r.reduced(6));
     }
 
 private:
@@ -171,8 +242,8 @@ private:
         int getNumRows() override { return owner.engine.getNumSlots(); }
         void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool) override
         {
-            g.setColour(juce::Colour(0xff2b2d31));
-            g.fillRoundedRectangle(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f, 4.0f);
+            g.setColour(Theme::row());
+            g.fillRoundedRectangle(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f, 8.0f);
         }
         juce::Component* refreshComponentForRow(int row, bool, juce::Component* existing) override
         {
@@ -196,39 +267,99 @@ private:
     struct PluginModel : juce::ListBoxModel
     {
         explicit PluginModel(MainComponent& o) : owner(o) {}
-        int getNumRows() override { return owner.engine.knownPlugins.getNumTypes(); }
+        int getNumRows() override { return (int) owner.filtered.size(); }
         void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected) override
         {
-            if (selected) g.fillAll(juce::Colour(0xff3a4a6b));
-            if (auto types = owner.engine.knownPlugins.getTypes(); row < types.size())
+            if (row < 0 || row >= (int) owner.filtered.size())
+                return;
+
+            if (selected)
             {
-                g.setColour(juce::Colours::white);
-                g.setFont(14.0f);
-                g.drawText(types[row].name + "  -  " + types[row].manufacturerName, 6, 0, w - 8, h,
-                           juce::Justification::centredLeft);
+                g.setColour(Theme::accent().withAlpha(0.28f));
+                g.fillRoundedRectangle(2.0f, 1.0f, (float) w - 4.0f, (float) h - 2.0f, 6.0f);
             }
+
+            auto& d = owner.filtered[(size_t) row];
+            auto area = juce::Rectangle<int>(0, 0, w, h).reduced(10, 0);
+
+            g.setColour(Theme::text());
+            g.setFont(juce::FontOptions(14.0f));
+            g.drawText(d.name, area.withTrimmedRight(area.getWidth() * 2 / 5),
+                       juce::Justification::centredLeft, true);
+
+            g.setColour(Theme::muted());
+            g.setFont(juce::FontOptions(12.0f));
+            g.drawText(d.manufacturerName, area.removeFromRight(area.getWidth() * 2 / 5),
+                       juce::Justification::centredRight, true);
         }
         void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
         {
-            auto types = owner.engine.knownPlugins.getTypes();
-            if (row < types.size())
-                owner.engine.addPlugin(types[row], [this](const juce::String& err)
-                {
-                    if (err.isNotEmpty())
-                        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                               "Couldn't load plugin", err);
-                });
+            owner.addFilteredPlugin(row);
         }
         MainComponent& owner;
     };
 
     //--------------------------------------------------------------------------
+    // Rebuilds the visible plugin list from the search text: every word typed
+    // must appear somewhere in the name, maker, category or format.
+    void rebuildFilter()
+    {
+        filtered.clear();
+
+        const auto words = juce::StringArray::fromTokens(searchBox.getText().trim(), " ", "");
+        const auto types = engine.knownPlugins.getTypes();
+
+        for (const auto& t : types)
+        {
+            const juce::String haystack = t.name + " " + t.manufacturerName + " "
+                                        + t.category + " " + t.pluginFormatName;
+            bool matches = true;
+            for (const auto& w : words)
+                if (! haystack.containsIgnoreCase(w)) { matches = false; break; }
+
+            if (matches)
+                filtered.push_back(t);
+        }
+
+        std::sort(filtered.begin(), filtered.end(),
+                  [](const juce::PluginDescription& a, const juce::PluginDescription& b)
+                  { return a.name.compareIgnoreCase(b.name) < 0; });
+
+        const int total = (int) types.size();
+        const int shown = (int) filtered.size();
+        pluginTitle.setText(words.isEmpty() ? "PLUGINS  -  " + juce::String(total)
+                                            : "PLUGINS  -  " + juce::String(shown) + " of " + juce::String(total),
+                            juce::dontSendNotification);
+    }
+
+    void addFilteredPlugin(int row)
+    {
+        if (row < 0 || row >= (int) filtered.size())
+            return;
+
+        engine.addPlugin(filtered[(size_t) row], [](const juce::String& err)
+        {
+            if (err.isNotEmpty())
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Couldn't load plugin", err);
+        });
+    }
+
+    // Enter in the search box adds the selected result, or the first one.
+    void addFromSearch()
+    {
+        int row = pluginList.getSelectedRow();
+        addFilteredPlugin(row >= 0 ? row : 0);
+    }
+
     void refresh()
     {
+        rebuildFilter();
         rackList.updateContent();
         rackList.repaint();
         pluginList.updateContent();
         pluginList.repaint();
+        repaint();
     }
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override
@@ -309,10 +440,13 @@ private:
     RackEngine engine;
     RackModel rackModel;
     PluginModel pluginModel;
+    std::vector<juce::PluginDescription> filtered;
     juce::ListBox pluginList, rackList;
+    juce::TextEditor searchBox;
     juce::TextButton scanBtn, audioBtn, saveBtn, loadBtn;
     juce::Slider gainSlider;
     juce::Label gainLabel, pluginTitle, rackTitle;
+    juce::Rectangle<int> pluginPanel, rackPanel;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
 
