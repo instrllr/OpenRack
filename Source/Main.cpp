@@ -7,7 +7,7 @@ struct EngineHolder { RackEngine engine { true }; };
 class StandaloneRack : private EngineHolder, public MainComponent
 {
 public:
-    StandaloneRack() : MainComponent(engine) {}
+    StandaloneRack() : MainComponent(EngineHolder::engine) {}
 };
 
 class OpenRackApplication : public juce::JUCEApplication
