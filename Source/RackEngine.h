@@ -108,6 +108,7 @@ public:
         audioOut = graph.addNode(std::make_unique<juce::AudioProcessorGraph::AudioGraphIOProcessor>(
             juce::AudioProcessorGraph::AudioGraphIOProcessor::audioOutputNode));
         gainNode = graph.addNode(std::make_unique<GainProcessor>());
+        inputNode = graph.addNode(std::make_unique<GainProcessor>());   // unity gain, only meters the input
 
         rebuildConnections();
 
@@ -172,70 +173,6 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // Bridge mode (standalone app): takes the rack's input from a virtual audio
-    // device - "OpenRack Bridge" on macOS, or a virtual cable such as VB-Cable
-    // or BlackHole - and sends the output to a real device. A DAW that plays to
-    // the virtual device is then processed by the rack.
-    // Returns an empty string on success, otherwise a message for the user.
-    juce::String useBridgeInput()
-    {
-        if (! ownsDevice)
-            return "Bridge mode is only available in the standalone app.";
-
-        auto* type = deviceManager.getCurrentDeviceTypeObject();
-        if (type == nullptr)
-            return "No audio system is available.";
-
-        type->scanForDevices();
-
-        auto isVirtual = [](const juce::String& n)
-        {
-            return n.containsIgnoreCase("OpenRack Bridge")
-                || n.containsIgnoreCase("CABLE")
-                || n.containsIgnoreCase("BlackHole");
-        };
-
-        // Prefer our own bridge, then VB-Cable, then BlackHole.
-        juce::String bridge;
-        const auto inputs = type->getDeviceNames(true);
-        for (auto* wanted : { "OpenRack Bridge", "CABLE Output", "BlackHole" })
-        {
-            for (auto& n : inputs)
-                if (n.containsIgnoreCase(wanted)) { bridge = n; break; }
-            if (bridge.isNotEmpty())
-                break;
-        }
-
-        if (bridge.isEmpty())
-            return "No bridge device was found.\n\nOn macOS, install the OpenRack Bridge driver. "
-                   "On Windows, install a virtual audio cable such as VB-Cable. Then try again.";
-
-        auto setup = deviceManager.getAudioDeviceSetup();
-        setup.inputDeviceName = bridge;
-        setup.useDefaultInputChannels = true;
-
-        // Never send the output back into a virtual device, or it would feed back on itself.
-        if (setup.outputDeviceName.isEmpty() || isVirtual(setup.outputDeviceName))
-        {
-            const auto outputs = type->getDeviceNames(false);
-            const int def = type->getDefaultDeviceIndex(false);
-            juce::String chosen;
-
-            if (def >= 0 && def < outputs.size() && ! isVirtual(outputs[def]))
-                chosen = outputs[def];
-            else
-                for (auto& n : outputs)
-                    if (! isVirtual(n)) { chosen = n; break; }
-
-            if (chosen.isEmpty())
-                return "No real output device was found to play the processed audio on.";
-            setup.outputDeviceName = chosen;
-        }
-
-        return deviceManager.setAudioDeviceSetup(setup, true);
-    }
-
-    //--------------------------------------------------------------------------
     int getNumSlots() const { return (int) slots.size(); }
     const Slot& getSlot(int i) const { return slots[(size_t) i]; }
 
@@ -247,6 +184,13 @@ public:
     {
         auto& p = (channel == 0) ? gainProc().peakL : gainProc().peakR;
         return p.exchange(0.0f);
+    }
+
+    // Same for the signal arriving at the rack.
+    float takeInputPeak(int channel)
+    {
+        auto& g = *static_cast<GainProcessor*>(inputNode->getProcessor());
+        return (channel == 0 ? g.peakL : g.peakR).exchange(0.0f);
     }
 
     //--------------------------------------------------------------------------
@@ -316,13 +260,63 @@ public:
         notify();
     }
 
+    // Moves slot `from` so it sits before slot `insertBefore` (0..numSlots) - used by drag and drop.
+    void moveSlotTo(int from, int insertBefore)
+    {
+        const int n = getNumSlots();
+        if (from < 0 || from >= n || insertBefore < 0 || insertBefore > n) return;
+
+        int to = insertBefore > from ? insertBefore - 1 : insertBefore;
+        if (to == from) return;
+
+        auto s = slots[(size_t) from];
+        slots.erase(slots.begin() + from);
+        slots.insert(slots.begin() + to, s);
+        rebuildConnections();
+        notify();
+    }
+
     void setBypassed(int i, bool b)
     {
         if (i >= 0 && i < getNumSlots())
         {
             slots[(size_t) i].node->setBypassed(b);
-            notifyLatency();
+            notify();
         }
+    }
+
+    void setAllBypassed(bool b)
+    {
+        for (auto& s : slots)
+            s.node->setBypassed(b);
+        notify();
+    }
+
+    bool areAllBypassed() const
+    {
+        if (slots.empty()) return false;
+        for (auto& s : slots)
+            if (! s.node->isBypassed()) return false;
+        return true;
+    }
+
+    void clearRack()
+    {
+        while (getNumSlots() > 0)
+            removeSlot(0);
+    }
+
+    // Inserts a plugin at a given position instead of the end (done after it has loaded).
+    void addPluginAt(const juce::PluginDescription& d, int insertAt,
+                     std::function<void(const juce::String&)> done = {})
+    {
+        const int before = getNumSlots();
+        addPlugin(d, [this, insertAt, before, done](const juce::String& err)
+        {
+            if (err.isEmpty() && insertAt >= 0 && insertAt < before && getNumSlots() > 0)
+                moveSlotTo(getNumSlots() - 1, insertAt);
+            if (done) done(err);
+        });
     }
 
     void openEditor(int i)
@@ -439,7 +433,8 @@ private:
                 graph.addConnection({ { a, ch }, { b, ch } });
         };
 
-        auto prev = audioIn->nodeID;
+        link(audioIn->nodeID, inputNode->nodeID);
+        auto prev = inputNode->nodeID;
         for (auto& s : slots)
         {
             link(prev, s.node->nodeID);
@@ -464,7 +459,7 @@ private:
 
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorPlayer player;
-    juce::AudioProcessorGraph::Node::Ptr audioIn, audioOut, gainNode;
+    juce::AudioProcessorGraph::Node::Ptr audioIn, audioOut, gainNode, inputNode;
     std::vector<Slot> slots;
     std::map<juce::uint32, std::unique_ptr<PluginWindow>> windows;
 };

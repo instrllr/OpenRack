@@ -2,18 +2,50 @@
 #include <algorithm>
 #include "RackEngine.h"
 #include "Theme.h"
+#include "HotPlugins.h"
+
+static constexpr int kRackRowHeight = 56;
+
+static int measureText(const juce::String& text, float height, bool bold = false)
+{
+    juce::GlyphArrangement ga;
+    ga.addLineOfText(juce::Font(juce::FontOptions(height, bold ? juce::Font::bold : juce::Font::plain)),
+                     text, 0.0f, 0.0f);
+    return (int) std::ceil(ga.getBoundingBox(0, -1, true).getWidth());
+}
 
 //==============================================================================
-// Stereo output meter with smooth fall-off.
+// Stereo level meter (input or output) with dB ticks, peak hold and a clip light.
 class LevelMeter : public juce::Component,
+                   public juce::SettableTooltipClient,
                    private juce::Timer
 {
 public:
-    explicit LevelMeter(RackEngine& e) : engine(e) { startTimerHz(30); }
+    LevelMeter(RackEngine& e, bool input, juce::String labelText)
+        : engine(e), isInput(input), label(std::move(labelText))
+    {
+        setTooltip(isInput ? "Level arriving at the rack. Click to reset the clip light."
+                           : "Level leaving the rack. Click to reset the clip light.");
+        startTimerHz(30);
+    }
+
+    void mouseDown(const juce::MouseEvent&) override { clipped = false; repaint(); }
 
     void paint(juce::Graphics& g) override
     {
         auto area = getLocalBounds().toFloat();
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+        g.drawText(label, area.removeFromLeft(30.0f), juce::Justification::centredLeft);
+
+        auto led = area.removeFromRight(12.0f);
+        area.removeFromRight(6.0f);
+
+        // Clip light
+        g.setColour(clipped ? juce::Colour(0xffff5252) : Theme::control());
+        g.fillRoundedRectangle(led.withSizeKeepingCentre(10.0f, juce::jmin(led.getHeight(), 22.0f)), 3.0f);
+
         const float gap = 3.0f;
         const float barH = (area.getHeight() - gap) / 2.0f;
 
@@ -33,40 +65,77 @@ public:
                 g.setGradientFill(grad);
                 g.fillRoundedRectangle(bar.withWidth(juce::jmax(barH, bar.getWidth() * frac)), barH * 0.5f);
             }
+
+            // Peak hold marker
+            const float hx = bar.getX() + bar.getWidth() * toFraction(hold[ch]);
+            if (hold[ch] > 0.001f)
+            {
+                g.setColour(Theme::text().withAlpha(0.85f));
+                g.fillRect(juce::Rectangle<float>(hx - 1.0f, bar.getY(), 2.0f, barH));
+            }
+        }
+
+        // dB ticks
+        g.setColour(juce::Colours::white.withAlpha(0.14f));
+        for (float db : { -48.0f, -36.0f, -24.0f, -12.0f, -6.0f, 0.0f })
+        {
+            const float x = area.getX() + area.getWidth() * dbToFraction(db);
+            g.fillRect(juce::Rectangle<float>(x, area.getY(), 1.0f, area.getHeight()));
         }
     }
 
 private:
-    static float toFraction(float gain)
-    {
-        const float db = juce::Decibels::gainToDecibels(gain, -60.0f);
-        return juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 66.0f); // -60 dB .. +6 dB
-    }
+    static float dbToFraction(float db) { return juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 66.0f); }   // -60 .. +6 dB
+    static float toFraction(float gain) { return dbToFraction(juce::Decibels::gainToDecibels(gain, -60.0f)); }
 
     void timerCallback() override
     {
         for (int ch = 0; ch < 2; ++ch)
-            level[ch] = juce::jmax(engine.takeOutputPeak(ch), level[ch] * 0.90f);
+        {
+            const float raw = isInput ? engine.takeInputPeak(ch) : engine.takeOutputPeak(ch);
+            if (raw >= 1.0f) clipped = true;
+
+            level[ch] = juce::jmax(raw, level[ch] * 0.90f);
+
+            if (level[ch] >= hold[ch]) { hold[ch] = level[ch]; holdTicks[ch] = 30; }
+            else if (holdTicks[ch] > 0) --holdTicks[ch];
+            else hold[ch] *= 0.93f;
+        }
         repaint();
     }
 
     RackEngine& engine;
+    const bool isInput;
+    juce::String label;
     float level[2] { 0.0f, 0.0f };
+    float hold[2] { 0.0f, 0.0f };
+    int holdTicks[2] { 0, 0 };
+    bool clipped = false;
 };
 
 //==============================================================================
-// One row in the rack list: number + name + Edit / Bypass / Up / Down / Remove.
+// One row in the rack list: grip + number + name + Edit / Bypass / Up / Down / Remove.
+// Mouse clicks on the empty parts fall through to the list, so rows can be
+// selected and dragged to reorder.
 class SlotRow : public juce::Component
 {
 public:
     explicit SlotRow(RackEngine& e) : engine(e)
     {
+        setInterceptsMouseClicks(false, true);
+
         edit.setButtonText("Edit");
         bypass.setButtonText("Bypass");
         bypass.setClickingTogglesState(true);
         up.setButtonText("^");
         down.setButtonText("v");
         remove.setButtonText("X");
+
+        edit.setTooltip("Open this plugin's window");
+        bypass.setTooltip("Switch this plugin off without removing it");
+        up.setTooltip("Move up (earlier in the chain)");
+        down.setTooltip("Move down (later in the chain)");
+        remove.setTooltip("Remove from the rack");
 
         for (auto* b : { &edit, &bypass, &up, &down, &remove })
             addAndMakeVisible(b);
@@ -86,6 +155,11 @@ public:
             auto& s = engine.getSlot(r);
             name = s.desc.name;
             details = s.desc.manufacturerName + "  -  " + s.desc.pluginFormatName;
+
+            const int lat = s.node->getProcessor()->getLatencySamples();
+            if (lat > 0)
+                details += "  -  " + juce::String(lat) + " smp latency";
+
             bypass.setToggleState(s.node->isBypassed(), juce::dontSendNotification);
         }
         repaint();
@@ -94,32 +168,39 @@ public:
     void paint(juce::Graphics& g) override
     {
         const bool bypassed = bypass.getToggleState();
-        const int textX = 50;
+        const int textX = 66;
         const int textW = juce::jmax(40, edit.getX() - textX - 8);
+        const float cy = (float) getHeight() * 0.5f;
+
+        // Drag grip
+        g.setColour(Theme::muted().withAlpha(0.6f));
+        for (int ry = -1; ry <= 1; ++ry)
+            for (int cx = 0; cx < 2; ++cx)
+                g.fillEllipse(10.0f + (float) cx * 5.0f, cy + (float) ry * 7.0f - 1.5f, 3.0f, 3.0f);
 
         // Colour bar, tinted per plugin
         g.setColour(bypassed ? Theme::muted() : Theme::tint(name));
-        g.fillRoundedRectangle(8.0f, 12.0f, 4.0f, (float) getHeight() - 24.0f, 2.0f);
+        g.fillRoundedRectangle(26.0f, 12.0f, 4.0f, (float) getHeight() - 24.0f, 2.0f);
 
         // Slot number
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-        g.drawText(juce::String(row + 1).paddedLeft('0', 2), 18, 0, 26, getHeight(),
+        g.drawText(juce::String(row + 1).paddedLeft('0', 2), 34, 0, 26, getHeight(),
                    juce::Justification::centred);
 
         g.setColour(bypassed ? Theme::muted() : Theme::text());
         g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-        g.drawText(name, textX, 6, textW, getHeight() / 2 - 4, juce::Justification::centredLeft, true);
+        g.drawText(name, textX, 7, textW, getHeight() / 2 - 5, juce::Justification::centredLeft, true);
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText(details, textX, getHeight() / 2, textW, getHeight() / 2 - 6,
+        g.drawText(details, textX, getHeight() / 2, textW, getHeight() / 2 - 7,
                    juce::Justification::centredLeft, true);
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(8, 11);
+        auto r = getLocalBounds().reduced(8, 12);
         remove.setBounds(r.removeFromRight(28));
         r.removeFromRight(4);
         down.setBounds(r.removeFromRight(28));
@@ -136,6 +217,82 @@ private:
     int row = 0;
     juce::String name, details;
     juce::TextButton edit, bypass, up, down, remove;
+};
+
+//==============================================================================
+// A quick-grab chip for the hot plugins strip. Click to add it to the rack,
+// drag it to drop it at an exact spot, right-click for pin/unpin.
+class HotChip : public juce::Component,
+                public juce::SettableTooltipClient
+{
+public:
+    std::function<void()> onClick, onMenu;
+
+    HotChip(juce::String pluginId, juce::String pluginName, bool isPinned)
+        : id(std::move(pluginId)), name(std::move(pluginName)), pinned(isPinned)
+    {
+        setTooltip("Click to add " + name + " to the rack. Drag it to choose where. Right-click for options.");
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    }
+
+    static int widthFor(const juce::String& name) { return measureText(name, 13.0f) + 46; }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(hover ? Theme::control().brighter(0.18f) : Theme::control());
+        g.fillRoundedRectangle(b, b.getHeight() * 0.5f);
+        g.setColour(hover ? Theme::accent().withAlpha(0.8f) : Theme::outline());
+        g.drawRoundedRectangle(b, b.getHeight() * 0.5f, 1.0f);
+
+        const float cy = b.getCentreY();
+        if (pinned)
+        {
+            juce::Path star;
+            star.addStar({ 17.0f, cy }, 5, 3.0f, 6.5f);
+            g.setColour(Theme::warning());
+            g.fillPath(star);
+        }
+        else
+        {
+            g.setColour(Theme::tint(name));
+            g.fillEllipse(13.0f, cy - 4.0f, 8.0f, 8.0f);
+        }
+
+        g.setColour(Theme::text());
+        g.setFont(juce::FontOptions(13.0f));
+        g.drawText(name, 28, 0, getWidth() - 36, getHeight(), juce::Justification::centredLeft, true);
+    }
+
+    void mouseEnter(const juce::MouseEvent&) override { hover = true; repaint(); }
+    void mouseExit(const juce::MouseEvent&) override { hover = false; repaint(); }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() && onMenu)
+            onMenu();
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (! e.mods.isLeftButtonDown() || e.getDistanceFromDragStart() < 6)
+            return;
+
+        if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor(this))
+            if (! c->isDragAndDropActive())
+                c->startDragging("add:" + id, this);
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (! e.mods.isPopupMenu() && ! e.mouseWasDraggedSinceMouseDown()
+             && contains(e.getPosition()) && onClick)
+            onClick();
+    }
+
+private:
+    juce::String id, name;
+    bool pinned = false, hover = false;
 };
 
 //==============================================================================
@@ -232,6 +389,9 @@ private:
 
 //==============================================================================
 class MainComponent : public juce::Component,
+                      public juce::DragAndDropContainer,
+                      public juce::DragAndDropTarget,
+                      public juce::FileDragAndDropTarget,
                       private juce::ChangeListener,
                       private juce::Timer
 {
@@ -239,10 +399,10 @@ public:
     // Set by the plugin window so the editor view can ask the DAW for more room.
     std::function<void(int, int)> onRequestSize;
 
-    explicit MainComponent(RackEngine& e) : engine(e), rackModel(*this), pluginModel(*this)
+    explicit MainComponent(RackEngine& e)
+        : engine(e), hot(getDataDir().getChildFile("hot.xml")), rackModel(*this), pluginModel(*this)
     {
-        auto dataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                           .getChildFile("OpenRack");
+        auto dataDir = getDataDir();
         dataDir.createDirectory();
         pluginListFile = dataDir.getChildFile("plugins.xml");
         deadMansFile = dataDir.getChildFile("scan-crash.txt");
@@ -260,19 +420,31 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &bridgeBtn, &saveBtn, &loadBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
-        bridgeBtn.setButtonText("Use Bridge");
+        hotBtn.setButtonText("Hot plugins");
         saveBtn.setButtonText("Save rack");
         loadBtn.setButtonText("Load rack");
+        bypassAllBtn.setButtonText("Bypass all");
+        clearBtn.setButtonText("Clear rack");
+
+        scanBtn.setTooltip("Find the plugins installed on this computer");
+        audioBtn.setTooltip("Choose the audio device, sample rate and buffer size");
+        hotBtn.setTooltip("Quick-grab menu: your pinned and most-used plugins");
+        saveBtn.setTooltip("Save this rack to a file");
+        loadBtn.setTooltip("Load a rack from a file");
+        bypassAllBtn.setTooltip("Switch every plugin in the rack off or on");
+        clearBtn.setTooltip("Remove every plugin from the rack");
 
         scanBtn.onClick = [this] { showScanner(); };
         audioBtn.onClick = [this] { showAudioSettings(); };
-        bridgeBtn.onClick = [this] { useBridge(); };
+        hotBtn.onClick = [this] { showHotMenu(); };
         saveBtn.onClick = [this] { saveRack(); };
         loadBtn.onClick = [this] { loadRack(); };
+        bypassAllBtn.onClick = [this] { engine.setAllBypassed(! engine.areAllBypassed()); };
+        clearBtn.onClick = [this] { confirmClear(); };
 
         // Plugin search
         searchBox.setTextToShowWhenEmpty("Search plugins by name, maker or type...", Theme::muted());
@@ -286,8 +458,8 @@ public:
 
         pluginList.setModel(&pluginModel);
         rackList.setModel(&rackModel);
-        rackList.setRowHeight(52);
-        pluginList.setRowHeight(30);
+        rackList.setRowHeight(kRackRowHeight);
+        pluginList.setRowHeight(32);
         addAndMakeVisible(pluginList);
         addAndMakeVisible(rackList);
 
@@ -297,7 +469,6 @@ public:
             l->setColour(juce::Label::textColourId, Theme::muted());
             addAndMakeVisible(l);
         }
-        rackTitle.setText("RACK  -  signal flows top to bottom", juce::dontSendNotification);
         gainLabel.setText("MASTER", juce::dontSendNotification);
 
         gainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -306,6 +477,7 @@ public:
         gainSlider.setDoubleClickReturnValue(true, 0.0);
         gainSlider.setTextValueSuffix(" dB");
         gainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
+        gainSlider.setTooltip("Master volume at the end of the rack (double-click to reset to 0 dB)");
         gainSlider.onValueChange = [this]
         {
             engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
@@ -313,11 +485,11 @@ public:
         gainSlider.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
                             juce::dontSendNotification);
         addAndMakeVisible(gainSlider);
+        addAndMakeVisible(inMeter);
         addAndMakeVisible(meter);
 
         // As a plugin the DAW owns the audio device, so there is nothing to configure.
         audioBtn.setVisible(engine.ownsAudioDevice());
-        bridgeBtn.setVisible(engine.ownsAudioDevice());
 
         // Inline plugin editors (used when running inside a DAW).
         addChildComponent(editorHost);
@@ -325,7 +497,7 @@ public:
         editorHost.onWantedSize = [this](int w, int h)
         {
             if (onRequestSize)
-                onRequestSize(juce::jmax(960, w), juce::jmax(620, h));
+                onRequestSize(juce::jmax(1020, w), juce::jmax(700, h));
         };
         if (! engine.ownsAudioDevice())
             engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
@@ -335,10 +507,12 @@ public:
                 closeInlineEditor(false);
         };
 
+        setSize(1020, 700);
         rebuildFilter();
+        rebuildHotChips();
+        refresh();
         timerCallback();
         startTimerHz(2);
-        setSize(960, 620);
     }
 
     ~MainComponent() override
@@ -376,8 +550,34 @@ public:
                                                Theme::accent().withAlpha(0.0f), w - 16.0f, 0.0f, false));
         g.fillRect(juce::Rectangle<float>(16.0f, 56.0f, w - 32.0f, 1.5f));
 
-        // Panels behind the two lists
-        for (auto* panel : { &pluginPanel, &rackPanel })
+        // Hot plugins strip
+        {
+            auto s = hotStrip.toFloat();
+            g.setColour(Theme::panel());
+            g.fillRoundedRectangle(s, 10.0f);
+            g.setColour(Theme::outline());
+            g.drawRoundedRectangle(s.reduced(0.5f), 10.0f, 1.0f);
+
+            juce::Path star;
+            star.addStar({ s.getX() + 20.0f, s.getCentreY() }, 5, 3.2f, 7.0f);
+            g.setColour(Theme::warning());
+            g.fillPath(star);
+            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+            g.drawText("HOT", (int) s.getX() + 30, hotStrip.getY(), 40, hotStrip.getHeight(),
+                       juce::Justification::centredLeft);
+
+            if (hotChips.empty())
+            {
+                g.setColour(Theme::muted());
+                g.setFont(juce::FontOptions(12.5f));
+                g.drawText("Click the star beside a plugin to pin it here. Your most-used plugins show up automatically.",
+                           hotStrip.withTrimmedLeft(78).withTrimmedRight(10),
+                           juce::Justification::centredLeft, true);
+            }
+        }
+
+        // Panels behind the two lists and the master bar
+        for (auto* panel : { &pluginPanel, &rackPanel, &masterBar })
         {
             auto p = panel->toFloat();
             g.setGradientFill(juce::ColourGradient(Theme::panel().brighter(0.06f), 0.0f, p.getY(),
@@ -394,14 +594,15 @@ public:
         if (filtered.empty())
         {
             const bool noPlugins = totalEffects == 0;
-            g.drawFittedText(noPlugins ? "No effect plugins yet.\nClick \"Scan plugins\" to find your VST3 effects."
+            g.drawFittedText(noPlugins ? "No effect plugins yet.\nClick \"Scan plugins\" to find your VST3 effects,\n"
+                                         "or drop a .vst3 file onto this window."
                                        : "No plugins match your search.",
-                             pluginPanel.reduced(24), juce::Justification::centred, 3);
+                             pluginPanel.reduced(24), juce::Justification::centred, 4);
         }
 
         if (engine.getNumSlots() == 0)
-            g.drawFittedText("The rack is empty.\nDouble-click a plugin on the left, "
-                             "or press Enter in the search box, to add it.",
+            g.drawFittedText("The rack is empty.\nDrag a plugin here, double-click one on the left,\n"
+                             "or press Enter in the search box.",
                              rackPanel.reduced(30), juce::Justification::centred, 4);
 
         // Status bar
@@ -419,7 +620,6 @@ public:
         if (editorHost.isVisible())
             return;
 
-
         // Magnifier icon inside the search box
         auto b = searchBox.getBounds().toFloat();
         const float cx = b.getX() + 17.0f;
@@ -428,6 +628,28 @@ public:
         g.setColour(Theme::muted());
         g.drawEllipse(cx - 5.5f, cy - 5.5f, 11.0f, 11.0f, 1.7f);
         g.drawLine(cx + 3.5f, cy + 3.5f, cx + 8.0f, cy + 8.0f, 1.9f);
+
+        // Drop feedback on the rack
+        if (dropIndex >= 0 || fileDropActive)
+        {
+            g.setColour(Theme::accent().withAlpha(0.14f));
+            g.fillRoundedRectangle(rackPanel.toFloat(), 10.0f);
+            g.setColour(Theme::accent());
+            g.drawRoundedRectangle(rackPanel.toFloat().reduced(1.0f), 10.0f, 2.0f);
+
+            if (dropIndex >= 0)
+            {
+                const int viewY = rackList.getViewport() != nullptr ? rackList.getViewport()->getViewPositionY() : 0;
+                float ly = (float) (rackList.getY() + dropIndex * kRackRowHeight - viewY);
+                ly = juce::jlimit((float) rackList.getY() + 1.0f, (float) rackList.getBottom() - 2.0f, ly);
+
+                g.setColour(Theme::accent());
+                g.fillRoundedRectangle((float) rackList.getX() + 8.0f, ly - 2.0f,
+                                       (float) rackList.getWidth() - 16.0f, 4.0f, 2.0f);
+                g.fillEllipse((float) rackList.getX() + 2.0f, ly - 5.0f, 10.0f, 10.0f);
+                g.fillEllipse((float) rackList.getRight() - 12.0f, ly - 5.0f, 10.0f, 10.0f);
+            }
+        }
     }
 
     void resized() override
@@ -437,21 +659,27 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &bridgeBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &saveBtn, &hotBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
         r.removeFromTop(16);
 
+        hotStrip = r.removeFromTop(36);
+        r.removeFromTop(12);
+
         statusBar = r.removeFromBottom(20);
         r.removeFromBottom(8);
 
-        auto bottom = r.removeFromBottom(34);
+        masterBar = r.removeFromBottom(54);
         r.removeFromBottom(12);
-        gainLabel.setBounds(bottom.removeFromLeft(70));
-        meter.setBounds(bottom.removeFromRight(190).reduced(0, 6));
-        bottom.removeFromRight(16);
-        gainSlider.setBounds(bottom);
+        auto inner = masterBar.reduced(14, 7);
+        gainLabel.setBounds(inner.removeFromLeft(64));
+        meter.setBounds(inner.removeFromRight(230));
+        inner.removeFromRight(14);
+        inMeter.setBounds(inner.removeFromRight(200));
+        inner.removeFromRight(18);
+        gainSlider.setBounds(inner);
 
         auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
         r.removeFromLeft(16);
@@ -463,21 +691,98 @@ public:
         pluginList.setBounds(left.reduced(6));
 
         rackTitle.setBounds(r.removeFromTop(24));
-        r.removeFromTop(40);
+        auto actions = r.removeFromTop(32);
+        bypassAllBtn.setBounds(actions.removeFromLeft(112).reduced(0, 2));
+        actions.removeFromLeft(8);
+        clearBtn.setBounds(actions.removeFromLeft(104).reduced(0, 2));
+        r.removeFromTop(8);
         rackPanel = r;
         rackList.setBounds(r.reduced(6));
+
+        layoutHotChips();
+    }
+
+    //--------------------------------------------------------------------------
+    // Drag and drop: plugins (from the list or hot strip) and rack rows
+    bool isInterestedInDragSource(const SourceDetails& d) override
+    {
+        if (editorHost.isVisible())
+            return false;
+        const auto s = d.description.toString();
+        return s.startsWith("add:") || s.startsWith("move:");
+    }
+
+    void itemDragEnter(const SourceDetails& d) override { updateDrop(d); }
+    void itemDragMove(const SourceDetails& d) override { updateDrop(d); }
+    void itemDragExit(const SourceDetails&) override { clearDrop(); }
+
+    void itemDropped(const SourceDetails& d) override
+    {
+        const int idx = dropIndexAt(d.localPosition);
+        clearDrop();
+        if (idx < 0)
+            return;
+
+        const auto s = d.description.toString();
+        if (s.startsWith("add:"))
+        {
+            if (auto desc = engine.knownPlugins.getTypeForIdentifierString(s.fromFirstOccurrenceOf("add:", false, false)))
+                addPluginDesc(*desc, idx);
+        }
+        else if (s.startsWith("move:"))
+        {
+            engine.moveSlotTo(s.fromFirstOccurrenceOf("move:", false, false).getIntValue(), idx);
+        }
+    }
+
+    // Dropping plugin files (.vst3 / .component) onto the window scans and adds them.
+    bool isInterestedInFileDrag(const juce::StringArray& files) override
+    {
+        if (editorHost.isVisible())
+            return false;
+        for (auto& f : files)
+            if (isPluginFile(f)) return true;
+        return false;
+    }
+
+    void fileDragEnter(const juce::StringArray&, int, int) override { fileDropActive = true; repaint(); }
+    void fileDragExit(const juce::StringArray&) override { fileDropActive = false; repaint(); }
+
+    void filesDropped(const juce::StringArray& files, int, int) override
+    {
+        fileDropActive = false;
+        repaint();
+        for (auto& f : files)
+            if (isPluginFile(f))
+                addPluginFile(f);
     }
 
 private:
     //--------------------------------------------------------------------------
+    static juce::File getDataDir()
+    {
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("OpenRack");
+    }
+
+    static bool isPluginFile(const juce::String& f)
+    {
+        return f.endsWithIgnoreCase(".vst3") || f.endsWithIgnoreCase(".component");
+    }
+
     struct RackModel : juce::ListBoxModel
     {
         explicit RackModel(MainComponent& o) : owner(o) {}
         int getNumRows() override { return owner.engine.getNumSlots(); }
-        void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool) override
+        void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool selected) override
         {
-            g.setColour(Theme::row());
-            g.fillRoundedRectangle(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f, 8.0f);
+            auto r = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
+            g.setColour(selected ? Theme::row().brighter(0.08f) : Theme::row());
+            g.fillRoundedRectangle(r, 8.0f);
+            if (selected)
+            {
+                g.setColour(Theme::accent().withAlpha(0.8f));
+                g.drawRoundedRectangle(r.reduced(0.5f), 8.0f, 1.5f);
+            }
         }
         juce::Component* refreshComponentForRow(int row, bool, juce::Component* existing) override
         {
@@ -494,6 +799,12 @@ private:
             }
             r->setRow(row);
             return r;
+        }
+        juce::var getDragSourceDescription(const juce::SparseSet<int>& rows) override
+        {
+            if (rows.size() > 0)
+                return "move:" + juce::String(rows[0]);
+            return {};
         }
         MainComponent& owner;
     };
@@ -516,6 +827,22 @@ private:
             auto& d = owner.filtered[(size_t) row];
             auto area = juce::Rectangle<int>(0, 0, w, h).reduced(10, 0);
 
+            // Pin star (click to pin as a hot plugin)
+            const bool pinned = owner.hot.isPinned(d.createIdentifierString());
+            juce::Path star;
+            star.addStar({ (float) area.getX() + 8.0f, (float) h * 0.5f }, 5, 3.3f, 7.2f);
+            if (pinned)
+            {
+                g.setColour(Theme::warning());
+                g.fillPath(star);
+            }
+            else
+            {
+                g.setColour(Theme::muted().withAlpha(0.7f));
+                g.strokePath(star, juce::PathStrokeType(1.1f));
+            }
+            area.removeFromLeft(24);
+
             // Colour dot matching the plugin's colour in the rack
             g.setColour(Theme::tint(d.name));
             g.fillEllipse((float) area.getX(), (float) h * 0.5f - 3.5f, 7.0f, 7.0f);
@@ -531,9 +858,32 @@ private:
             g.drawText(d.manufacturerName, area.removeFromRight(area.getWidth() * 2 / 5),
                        juce::Justification::centredRight, true);
         }
-        void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
+        void listBoxItemClicked(int row, const juce::MouseEvent& e) override
         {
-            owner.addFilteredPlugin(row);
+            if (row < 0 || row >= (int) owner.filtered.size())
+                return;
+
+            const auto id = owner.filtered[(size_t) row].createIdentifierString();
+            if (e.mods.isPopupMenu())
+            {
+                owner.showHotItemMenu(id);
+            }
+            else if (e.x < 30)
+            {
+                owner.hot.togglePin(id);
+                owner.afterHotChanged();
+            }
+        }
+        void listBoxItemDoubleClicked(int row, const juce::MouseEvent& e) override
+        {
+            if (e.x >= 30)
+                owner.addFilteredPlugin(row);
+        }
+        juce::var getDragSourceDescription(const juce::SparseSet<int>& rows) override
+        {
+            if (rows.size() > 0 && rows[0] >= 0 && rows[0] < (int) owner.filtered.size())
+                return "add:" + owner.filtered[(size_t) rows[0]].createIdentifierString();
+            return {};
         }
         MainComponent& owner;
     };
@@ -579,17 +929,41 @@ private:
                             juce::dontSendNotification);
     }
 
-    void addFilteredPlugin(int row)
+    //--------------------------------------------------------------------------
+    // Adds a plugin, optionally at a specific position, and counts it as "used".
+    void addPluginDesc(const juce::PluginDescription& d, int insertAt = -1)
     {
-        if (row < 0 || row >= (int) filtered.size())
-            return;
+        juce::Component::SafePointer<MainComponent> safe(this);
+        const auto id = d.createIdentifierString();
 
-        engine.addPlugin(filtered[(size_t) row], [](const juce::String& err)
+        auto done = [safe, id](const juce::String& err)
         {
             if (err.isNotEmpty())
+            {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                        "Couldn't load plugin", err);
-        });
+                return;
+            }
+            if (safe != nullptr)
+            {
+                safe->hot.recordUse(id);
+                juce::MessageManager::callAsync([safe]
+                {
+                    if (safe != nullptr) safe->rebuildHotChips();
+                });
+            }
+        };
+
+        if (insertAt >= 0 && insertAt < engine.getNumSlots())
+            engine.addPluginAt(d, insertAt, done);
+        else
+            engine.addPlugin(d, done);
+    }
+
+    void addFilteredPlugin(int row)
+    {
+        if (row >= 0 && row < (int) filtered.size())
+            addPluginDesc(filtered[(size_t) row]);
     }
 
     // Enter in the search box adds the selected result, or the first one.
@@ -599,6 +973,244 @@ private:
         addFilteredPlugin(row >= 0 ? row : 0);
     }
 
+    // A .vst3 / .component dropped onto the window: scan it, then add any effects in it.
+    void addPluginFile(const juce::String& path)
+    {
+        std::vector<juce::PluginDescription> candidates;
+
+        for (int i = 0; i < engine.formatManager.getNumFormats(); ++i)
+        {
+            auto* format = engine.formatManager.getFormat(i);
+            if (format == nullptr || ! format->fileMightContainThisPluginType(path))
+                continue;
+
+            juce::OwnedArray<juce::PluginDescription> found;
+            engine.knownPlugins.scanAndAddFile(path, true, found, *format);
+
+            for (auto* d : found)
+                candidates.push_back(*d);
+        }
+
+        if (candidates.empty())
+        {
+            // Already in the list: look it up there.
+            const juce::File file(path);
+            for (const auto& t : engine.knownPlugins.getTypes())
+                if (juce::File(t.fileOrIdentifier) == file || t.name == file.getFileNameWithoutExtension())
+                    candidates.push_back(t);
+        }
+
+        int effects = 0, instruments = 0;
+        for (auto& d : candidates)
+        {
+            if (d.isInstrument) { ++instruments; continue; }
+            ++effects;
+            addPluginDesc(d);
+        }
+
+        if (effects == 0)
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::InfoIcon, "Drop a plugin",
+                instruments > 0 ? juce::File(path).getFileName() + " is an instrument. OpenRack only hosts effects."
+                                : "Couldn't find a plugin in " + juce::File(path).getFileName() + ".");
+    }
+
+    //--------------------------------------------------------------------------
+    // Drop feedback
+    int dropIndexAt(juce::Point<int> p) const
+    {
+        if (! rackPanel.contains(p))
+            return -1;
+
+        const auto lp = rackList.getLocalPoint(this, p);
+        const int idx = rackList.getInsertionIndexForPosition(lp.x, lp.y);
+        return idx < 0 ? engine.getNumSlots() : juce::jmin(idx, engine.getNumSlots());
+    }
+
+    void updateDrop(const SourceDetails& d)
+    {
+        const int idx = dropIndexAt(d.localPosition);
+        if (idx != dropIndex)
+        {
+            dropIndex = idx;
+            repaint();
+        }
+    }
+
+    void clearDrop()
+    {
+        if (dropIndex != -1)
+        {
+            dropIndex = -1;
+            repaint();
+        }
+    }
+
+    //--------------------------------------------------------------------------
+    // Hot plugins: pinned + most used, as chips under the toolbar and in a menu.
+    void rebuildHotChips()
+    {
+        struct Item { juce::String id, name; bool pinned; };
+        std::vector<Item> items;
+
+        auto push = [&](const juce::String& id, bool pinned)
+        {
+            if (auto d = engine.knownPlugins.getTypeForIdentifierString(id))
+                if (! d->isInstrument)
+                    items.push_back({ id, d->name, pinned });
+        };
+
+        for (auto& id : hot.getPinned())      push(id, true);
+        for (auto& id : hot.getMostUsed(8))   push(id, false);
+
+        juce::String sig;
+        for (auto& it : items)
+            sig += it.id + (it.pinned ? "*" : "") + "|";
+
+        if (sig == hotSignature)
+            return;
+        hotSignature = sig;
+
+        hotChips.clear();
+        for (auto& it : items)
+        {
+            auto chip = std::make_unique<HotChip>(it.id, it.name, it.pinned);
+            chip->setSize(HotChip::widthFor(it.name), 26);
+
+            const auto id = it.id;
+            chip->onClick = [this, id]
+            {
+                if (auto d = engine.knownPlugins.getTypeForIdentifierString(id))
+                    addPluginDesc(*d);
+            };
+            chip->onMenu = [this, id] { showHotItemMenu(id); };
+
+            addAndMakeVisible(*chip);
+            hotChips.push_back(std::move(chip));
+        }
+
+        layoutHotChips();
+        repaint(hotStrip);
+    }
+
+    void layoutHotChips()
+    {
+        int x = hotStrip.getX() + 78;
+        const int right = hotStrip.getRight() - 10;
+        const int y = hotStrip.getCentreY() - 13;
+
+        for (auto& c : hotChips)
+        {
+            const int w = c->getWidth();
+            c->setTopLeftPosition(x, y);
+            c->setVisible(x + w <= right);
+            x += w + 8;
+        }
+    }
+
+    void afterHotChanged()
+    {
+        rebuildHotChips();
+        pluginList.repaint();
+    }
+
+    void showHotItemMenu(const juce::String& id)
+    {
+        const bool pinned = hot.isPinned(id);
+
+        juce::PopupMenu m;
+        m.addItem(1, "Add to rack");
+        m.addItem(2, pinned ? "Unpin from hot plugins" : "Pin to hot plugins");
+        m.addItem(3, "Remove from hot plugins", pinned || hot.getUseCount(id) > 0);
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, id](int r)
+        {
+            if (safe == nullptr)
+                return;
+
+            if (r == 1)
+            {
+                if (auto d = safe->engine.knownPlugins.getTypeForIdentifierString(id))
+                    safe->addPluginDesc(*d);
+            }
+            else if (r == 2) { safe->hot.togglePin(id); safe->afterHotChanged(); }
+            else if (r == 3) { safe->hot.forget(id);    safe->afterHotChanged(); }
+        });
+    }
+
+    void showHotMenu()
+    {
+        juce::PopupMenu m;
+        auto ids = std::make_shared<std::vector<juce::String>>();
+
+        auto addEntry = [&](const juce::String& id, const juce::String& suffix)
+        {
+            if (auto d = engine.knownPlugins.getTypeForIdentifierString(id))
+            {
+                if (d->isInstrument)
+                    return;
+                ids->push_back(id);
+                m.addItem((int) ids->size(), d->name + suffix);
+            }
+        };
+
+        m.addSectionHeader("Pinned");
+        for (auto& id : hot.getPinned())
+            addEntry(id, {});
+        if (ids->empty())
+            m.addItem(5000, "Click the star beside a plugin to pin it", false);
+
+        const auto used = hot.getMostUsed(8);
+        if (! used.isEmpty())
+        {
+            m.addSeparator();
+            m.addSectionHeader("Most used");
+            for (auto& id : used)
+                addEntry(id, "     " + juce::String(hot.getUseCount(id)) + "x");
+        }
+
+        m.addSeparator();
+        m.addItem(10000, "Clear usage history", hot.hasAnyUsage());
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&hotBtn), [safe, ids](int r)
+        {
+            if (safe == nullptr || r <= 0)
+                return;
+
+            if (r == 10000)
+            {
+                safe->hot.clearUsage();
+                safe->afterHotChanged();
+            }
+            else if (r <= (int) ids->size())
+            {
+                if (auto d = safe->engine.knownPlugins.getTypeForIdentifierString((*ids)[(size_t) r - 1]))
+                    safe->addPluginDesc(*d);
+            }
+        });
+    }
+
+    void confirmClear()
+    {
+        if (engine.getNumSlots() == 0)
+            return;
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::AlertWindow::showAsync(
+            juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::QuestionIcon, "Clear rack",
+                "Remove all " + juce::String(engine.getNumSlots()) + " plugins from the rack?",
+                "Clear", "Cancel", this),
+            [safe](int result)
+            {
+                if (result == 1 && safe != nullptr)
+                    safe->engine.clearRack();
+            });
+    }
+
+    //--------------------------------------------------------------------------
     void refresh()
     {
         // Keep the master slider in step with a rack loaded by the host or from a file.
@@ -609,6 +1221,19 @@ private:
         rackList.repaint();
         pluginList.updateContent();
         pluginList.repaint();
+
+        const int n = engine.getNumSlots();
+        const int lat = engine.getTotalLatency();
+        auto title = "RACK  -  " + juce::String(n) + (n == 1 ? " plugin" : " plugins");
+        if (lat > 0)
+            title += "  -  latency " + juce::String(lat) + " smp";
+        rackTitle.setText(title, juce::dontSendNotification);
+
+        bypassAllBtn.setButtonText(engine.areAllBypassed() ? "Enable all" : "Bypass all");
+        bypassAllBtn.setEnabled(n > 0);
+        clearBtn.setEnabled(n > 0);
+
+        rebuildHotChips();
         repaint();
     }
 
@@ -703,16 +1328,6 @@ private:
             onRequestSize(preEditorW, preEditorH);
     }
 
-    void useBridge()
-    {
-        const juce::String error = engine.useBridgeInput();
-
-        if (error.isNotEmpty())
-            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
-                                                   "OpenRack Bridge", error);
-        timerCallback();    // refresh the status bar with the new device
-    }
-
     void showAudioSettings()
     {
         auto* c = new Themed<juce::AudioDeviceSelectorComponent>(engine.deviceManager, 0, 2, 0, 2,
@@ -767,23 +1382,30 @@ private:
 
     //--------------------------------------------------------------------------
     RackEngine& engine;
-    LevelMeter meter { engine };
+    HotPlugins hot;
+    LevelMeter inMeter { engine, true, "IN" };
+    LevelMeter meter { engine, false, "OUT" };
     RackModel rackModel;
     PluginModel pluginModel;
     std::vector<juce::PluginDescription> filtered;
     int totalEffects = 0;
     juce::ListBox pluginList, rackList;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, bridgeBtn, saveBtn, loadBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn;
     juce::Slider gainSlider;
     juce::Label gainLabel, pluginTitle, rackTitle;
-    juce::Rectangle<int> pluginPanel, rackPanel, statusBar;
+    juce::Rectangle<int> pluginPanel, rackPanel, statusBar, hotStrip, masterBar;
     juce::String statusText;
+    std::vector<std::unique_ptr<HotChip>> hotChips;
+    juce::String hotSignature;
+    int dropIndex = -1;
+    bool fileDropActive = false;
     InlineEditorHost editorHost;
     juce::uint32 inlineNode = 0;
-    int preEditorW = 960, preEditorH = 620;
+    int preEditorW = 1020, preEditorH = 700;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::TooltipWindow tooltipWindow { this, 700 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

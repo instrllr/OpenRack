@@ -105,7 +105,7 @@ OpenRackEditor::OpenRackEditor(OpenRackProcessor& p) : AudioProcessorEditor(&p)
 
     setResizable(true, true);
     setResizeLimits(800, 500, 4000, 3000);
-    setSize(960, 620);
+    setSize(1020, 700);
 }
 
 // Called by the plugin wrapper to create the plugin.

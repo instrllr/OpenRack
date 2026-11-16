@@ -33,34 +33,6 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
-      # Does macOS actually load the bridge driver? Install it on the runner,
-      # restart CoreAudio and see whether "OpenRack Bridge" shows up as a device.
-      - name: Test bridge driver loads (macOS)
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        run: |
-          DRV=$(find build -maxdepth 3 -type d -name OpenRackBridge.driver | head -1)
-          echo "driver bundle: $DRV"
-          find "$DRV" -type f
-          echo "--- header check: type UUID"
-          grep -rn "kAudioServerPlugInTypeUUID" "$(xcrun --show-sdk-path)/System/Library/Frameworks/CoreAudio.framework/Headers/AudioServerPlugIn.h" | head -3 || true
-          codesign --force --deep --sign - "$DRV"
-          sudo mkdir -p /Library/Audio/Plug-Ins/HAL
-          sudo cp -R "$DRV" /Library/Audio/Plug-Ins/HAL/
-          sudo chown -R root:wheel /Library/Audio/Plug-Ins/HAL/OpenRackBridge.driver
-          sudo killall coreaudiod || true
-          sleep 10
-          echo "--- audio devices"
-          system_profiler SPAudioDataType 2>&1 | tee audio-devices.txt
-          echo "--- coreaudiod log"
-          log show --last 3m --predicate 'process == "coreaudiod"' --style compact 2>&1 | grep -iE "openrack|plug-in|plugin|driver|HAL" | head -40 || true
-          if grep -qi "OpenRack Bridge" audio-devices.txt; then
-            echo "RESULT: BRIDGE DEVICE LISTED"
-          else
-            echo "RESULT: BRIDGE DEVICE NOT LISTED"
-            exit 1
-          fi
-
       # Package the app so file permissions survive the artifact upload.
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -108,21 +80,6 @@ jobs:
             --version 0.1.0 --install-location / OpenRack-Plugins-macOS.pkg
           (cd "$(dirname "$VST3")" && ditto -c -k --keepParent OpenRack.vst3 "$GITHUB_WORKSPACE/OpenRack-VST3-macOS.zip")
           (cd "$(dirname "$AU")" && ditto -c -k --keepParent OpenRack.component "$GITHUB_WORKSPACE/OpenRack-AU-macOS.zip")
-
-      - name: Package bridge driver (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          DRV=$(find build -maxdepth 3 -type d -name OpenRackBridge.driver | head -1)
-          codesign --force --deep --sign - "$DRV"
-          ROOT="$GITHUB_WORKSPACE/pkgroot-bridge"
-          mkdir -p "$ROOT/Library/Audio/Plug-Ins/HAL" "$GITHUB_WORKSPACE/scripts-bridge"
-          cp -R "$DRV" "$ROOT/Library/Audio/Plug-Ins/HAL/"
-          # Restart CoreAudio after install so the new device appears.
-          printf '#!/bin/sh\nkillall coreaudiod 2>/dev/null\nexit 0\n' > "$GITHUB_WORKSPACE/scripts-bridge/postinstall"
-          chmod +x "$GITHUB_WORKSPACE/scripts-bridge/postinstall"
-          pkgbuild --root "$ROOT" --scripts "$GITHUB_WORKSPACE/scripts-bridge" \
-            --identifier com.openrack.bridge.pkg --version 0.1.0 \
-            --install-location / OpenRack-Bridge-macOS.pkg
 
       - name: Package plugins (Windows)
         if: runner.os == 'Windows'
@@ -194,6 +151,5 @@ jobs:
             OpenRack-VST3-macOS.zip
             OpenRack-AU-macOS.zip
             OpenRack-Plugins-macOS.pkg
-            OpenRack-Bridge-macOS.pkg
             OpenRack-VST3-Windows.zip
           if-no-files-found: error
