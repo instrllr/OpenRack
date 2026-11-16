@@ -271,8 +271,8 @@ public:
 
         if (filtered.empty())
         {
-            const bool noPlugins = engine.knownPlugins.getNumTypes() == 0;
-            g.drawFittedText(noPlugins ? "No plugins yet.\nClick \"Scan plugins\" to find your VST3 plugins."
+            const bool noPlugins = totalEffects == 0;
+            g.drawFittedText(noPlugins ? "No effect plugins yet.\nClick \"Scan plugins\" to find your VST3 effects."
                                        : "No plugins match your search.",
                              pluginPanel.reduced(24), juce::Justification::centred, 3);
         }
@@ -418,8 +418,16 @@ private:
         const auto words = juce::StringArray::fromTokens(searchBox.getText().trim(), " ", "");
         const auto types = engine.knownPlugins.getTypes();
 
+        totalEffects = 0;
+
         for (const auto& t : types)
         {
+            // Effects only: virtual instruments (synths, samplers) are left out.
+            if (t.isInstrument)
+                continue;
+
+            ++totalEffects;
+
             const juce::String haystack = t.name + " " + t.manufacturerName + " "
                                         + t.category + " " + t.pluginFormatName;
             bool matches = true;
@@ -434,7 +442,7 @@ private:
                   [](const juce::PluginDescription& a, const juce::PluginDescription& b)
                   { return a.name.compareIgnoreCase(b.name) < 0; });
 
-        const int total = (int) types.size();
+        const int total = totalEffects;
         const int shown = (int) filtered.size();
         pluginTitle.setText(words.isEmpty() ? "PLUGINS  -  " + juce::String(total)
                                             : "PLUGINS  -  " + juce::String(shown) + " of " + juce::String(total),
@@ -581,6 +589,7 @@ private:
     RackModel rackModel;
     PluginModel pluginModel;
     std::vector<juce::PluginDescription> filtered;
+    int totalEffects = 0;
     juce::ListBox pluginList, rackList;
     juce::TextEditor searchBox;
     juce::TextButton scanBtn, audioBtn, saveBtn, loadBtn;
