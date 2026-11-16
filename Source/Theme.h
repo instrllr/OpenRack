@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <utility>
 
 //==============================================================================
 // Colour palette used across the app.
@@ -96,4 +97,24 @@ public:
         g.setColour(Theme::outline());
         g.drawRoundedRectangle(bounds, 6.0f, 1.0f);
     }
+};
+
+//==============================================================================
+// Wraps any component so it uses OpenRack's look. Used for pop-up dialogs, so
+// they match the theme without changing the look of the host application when
+// OpenRack runs as a plugin inside a DAW.
+template <typename Content>
+class Themed : public Content
+{
+public:
+    template <typename... Args>
+    explicit Themed(Args&&... args) : Content(std::forward<Args>(args)...)
+    {
+        this->setLookAndFeel(&laf.get());
+    }
+
+    ~Themed() override { this->setLookAndFeel(nullptr); }
+
+private:
+    juce::SharedResourcePointer<OpenRackLookAndFeel> laf;
 };

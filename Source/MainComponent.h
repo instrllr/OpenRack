@@ -144,7 +144,7 @@ class MainComponent : public juce::Component,
                       private juce::Timer
 {
 public:
-    MainComponent() : rackModel(*this), pluginModel(*this)
+    explicit MainComponent(RackEngine& e) : engine(e), rackModel(*this), pluginModel(*this)
     {
         auto dataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
                            .getChildFile("OpenRack");
@@ -213,8 +213,13 @@ public:
         {
             engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
         };
+        gainSlider.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
+                            juce::dontSendNotification);
         addAndMakeVisible(gainSlider);
         addAndMakeVisible(meter);
+
+        // As a plugin the DAW owns the audio device, so there is nothing to configure.
+        audioBtn.setVisible(engine.ownsAudioDevice());
 
         rebuildFilter();
         timerCallback();
@@ -283,7 +288,8 @@ public:
                              rackPanel.reduced(30), juce::Justification::centred, 4);
 
         // Status bar
-        const bool hasDevice = engine.deviceManager.getCurrentAudioDevice() != nullptr;
+        const bool hasDevice = ! engine.ownsAudioDevice()
+                                || engine.deviceManager.getCurrentAudioDevice() != nullptr;
         g.setColour(hasDevice ? juce::Colour(0xff3ddc84) : Theme::warning());
         g.fillEllipse((float) statusBar.getX() + 2.0f, (float) statusBar.getCentreY() - 3.0f, 7.0f, 7.0f);
         g.setColour(Theme::muted());
@@ -309,7 +315,8 @@ public:
 
         auto top = r.removeFromTop(40);
         for (auto* b : { &loadBtn, &saveBtn, &audioBtn, &scanBtn })
-            b->setBounds(top.removeFromRight(116).reduced(3, 3));
+            if (b->isVisible())
+                b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
         r.removeFromTop(16);
 
@@ -471,6 +478,9 @@ private:
 
     void refresh()
     {
+        // Keep the master slider in step with a rack loaded by the host or from a file.
+        gainSlider.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
+                            juce::dontSendNotification);
         rebuildFilter();
         rackList.updateContent();
         rackList.repaint();
@@ -490,7 +500,14 @@ private:
     void timerCallback() override
     {
         juce::String s;
-        if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
+        if (! engine.ownsAudioDevice())
+        {
+            s = "Running inside your DAW"
+                "      " + juce::String((int) engine.getSampleRate()) + " Hz"
+                "      " + juce::String(engine.getBlockSize()) + " samples"
+                "      rack latency " + juce::String(engine.getTotalLatency()) + " samples";
+        }
+        else if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
         {
             const double sr = dev->getCurrentSampleRate();
             const int bs = dev->getCurrentBufferSizeSamples();
@@ -516,8 +533,8 @@ private:
 
     void showScanner()
     {
-        auto* c = new juce::PluginListComponent(engine.formatManager, engine.knownPlugins,
-                                                deadMansFile, nullptr);
+        auto* c = new Themed<juce::PluginListComponent>(engine.formatManager, engine.knownPlugins,
+                                                        deadMansFile, nullptr);
         c->setSize(720, 500);
 
         juce::DialogWindow::LaunchOptions o;
@@ -533,8 +550,8 @@ private:
 
     void showAudioSettings()
     {
-        auto* c = new juce::AudioDeviceSelectorComponent(engine.deviceManager, 0, 2, 0, 2,
-                                                         false, false, true, false);
+        auto* c = new Themed<juce::AudioDeviceSelectorComponent>(engine.deviceManager, 0, 2, 0, 2,
+                                                                 false, false, true, false);
         c->setSize(500, 450);
 
         juce::DialogWindow::LaunchOptions o;
@@ -584,7 +601,7 @@ private:
     }
 
     //--------------------------------------------------------------------------
-    RackEngine engine;
+    RackEngine& engine;
     LevelMeter meter { engine };
     RackModel rackModel;
     PluginModel pluginModel;

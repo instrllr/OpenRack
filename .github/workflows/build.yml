@@ -58,6 +58,36 @@ jobs:
           $exe = Get-ChildItem -Path build/OpenRack_artefacts -Recurse -Filter OpenRack.exe | Select-Object -First 1
           Compress-Archive -Path $exe.FullName -DestinationPath OpenRack-Windows.zip
 
+      # Plugin versions (VST3 for FL Studio / Ableton, AU for Logic Pro).
+      - name: Package plugins (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          tar czf OpenRack-VST3-Linux.tar.gz -C "$(dirname "$VST3")" OpenRack.vst3
+
+      - name: Package plugins (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          AU=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.component | head -1)
+          codesign --force --deep --sign - "$VST3"
+          codesign --force --deep --sign - "$AU"
+          ROOT="$GITHUB_WORKSPACE/pkgroot-plugins"
+          mkdir -p "$ROOT/Library/Audio/Plug-Ins/VST3" "$ROOT/Library/Audio/Plug-Ins/Components"
+          cp -R "$VST3" "$ROOT/Library/Audio/Plug-Ins/VST3/"
+          cp -R "$AU" "$ROOT/Library/Audio/Plug-Ins/Components/"
+          pkgbuild --root "$ROOT" --identifier com.openrack.OpenRack.plugins \
+            --version 0.1.0 --install-location / OpenRack-Plugins-macOS.pkg
+          (cd "$(dirname "$VST3")" && ditto -c -k --keepParent OpenRack.vst3 "$GITHUB_WORKSPACE/OpenRack-VST3-macOS.zip")
+          (cd "$(dirname "$AU")" && ditto -c -k --keepParent OpenRack.component "$GITHUB_WORKSPACE/OpenRack-AU-macOS.zip")
+
+      - name: Package plugins (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Select-Object -First 1
+          Compress-Archive -Path $vst3.FullName -DestinationPath OpenRack-VST3-Windows.zip
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
@@ -67,4 +97,9 @@ jobs:
             OpenRack-macOS.zip
             OpenRack-macOS.pkg
             OpenRack-Windows.zip
+            OpenRack-VST3-Linux.tar.gz
+            OpenRack-VST3-macOS.zip
+            OpenRack-AU-macOS.zip
+            OpenRack-Plugins-macOS.pkg
+            OpenRack-VST3-Windows.zip
           if-no-files-found: error

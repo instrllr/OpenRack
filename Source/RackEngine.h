@@ -2,9 +2,10 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <map>
+#include <memory>
 
 //==============================================================================
-// Simple master gain stage at the end of the chain.
+// Simple master gain stage at the end of the chain, with peak metering.
 class GainProcessor : public juce::AudioProcessor
 {
 public:
@@ -77,6 +78,9 @@ private:
 };
 
 //==============================================================================
+// The rack itself. Two modes:
+//  - ownsAudioDevice = true : the standalone app, which opens its own audio device.
+//  - ownsAudioDevice = false: the plugin, where the DAW calls prepare()/process().
 class RackEngine
 {
 public:
@@ -88,15 +92,15 @@ public:
 
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPlugins;
-    juce::AudioDeviceManager deviceManager;
-    std::function<void()> onChanged;
+    juce::AudioDeviceManager deviceManager;     // only used when ownsAudioDevice
+    std::function<void()> onChanged;            // rack contents changed (message thread)
+    std::function<void()> onLatencyChanged;     // total latency may have changed
 
-    RackEngine()
+    explicit RackEngine(bool ownsAudioDevice = true) : ownsDevice(ownsAudioDevice)
     {
         formatManager.addDefaultFormats();
-        deviceManager.initialiseWithDefaultDevices(2, 2);
 
-        graph.setPlayConfigDetails(2, 2, 44100.0, 512);
+        graph.setPlayConfigDetails(2, 2, sampleRate, blockSize);
         audioIn = graph.addNode(std::make_unique<juce::AudioProcessorGraph::AudioGraphIOProcessor>(
             juce::AudioProcessorGraph::AudioGraphIOProcessor::audioInputNode));
         audioOut = graph.addNode(std::make_unique<juce::AudioProcessorGraph::AudioGraphIOProcessor>(
@@ -105,15 +109,64 @@ public:
 
         rebuildConnections();
 
-        player.setProcessor(&graph);
-        deviceManager.addAudioCallback(&player);
+        if (ownsDevice)
+        {
+            deviceManager.initialiseWithDefaultDevices(2, 2);
+            player.setProcessor(&graph);
+            deviceManager.addAudioCallback(&player);
+        }
     }
 
     ~RackEngine()
     {
+        aliveToken.reset();     // any plugin still loading will notice and give up
         windows.clear();
-        deviceManager.removeAudioCallback(&player);
-        player.setProcessor(nullptr);
+
+        if (ownsDevice)
+        {
+            deviceManager.removeAudioCallback(&player);
+            player.setProcessor(nullptr);
+        }
+    }
+
+    bool ownsAudioDevice() const { return ownsDevice; }
+
+    //--------------------------------------------------------------------------
+    // Plugin mode: called by the host.
+    void prepare(double sr, int bs)
+    {
+        sampleRate = sr;
+        blockSize = bs;
+        graph.setPlayConfigDetails(2, 2, sr, bs);
+        graph.prepareToPlay(sr, bs);
+    }
+
+    void release() { graph.releaseResources(); }
+
+    void process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+    {
+        graph.processBlock(buffer, midi);
+    }
+
+    double getSampleRate() const { return sampleRate; }
+    int getBlockSize() const { return blockSize; }
+
+    // Total latency of the active plugins in the chain, so the host can compensate.
+    int getTotalLatency() const
+    {
+        int total = 0;
+        for (auto& s : slots)
+            if (! s.node->isBypassed())
+                total += s.node->getProcessor()->getLatencySamples();
+        return total;
+    }
+
+    double getTotalTailSeconds() const
+    {
+        double total = 0.0;
+        for (auto& s : slots)
+            total += s.node->getProcessor()->getTailLengthSeconds();
+        return total;
     }
 
     //--------------------------------------------------------------------------
@@ -137,19 +190,27 @@ public:
                    juce::MemoryBlock state = {},
                    bool bypassed = false)
     {
-        double sr = 44100.0;
-        int bs = 512;
-        if (auto* dev = deviceManager.getCurrentAudioDevice())
+        double sr = sampleRate;
+        int bs = blockSize;
+        if (ownsDevice)
         {
-            sr = dev->getCurrentSampleRate();
-            bs = dev->getCurrentBufferSizeSamples();
+            if (auto* dev = deviceManager.getCurrentAudioDevice())
+            {
+                sr = dev->getCurrentSampleRate();
+                bs = dev->getCurrentBufferSizeSamples();
+            }
         }
+
+        std::weak_ptr<int> alive = aliveToken;
 
         formatManager.createPluginInstanceAsync(
             d, sr, bs,
-            [this, d, done, state, bypassed](std::unique_ptr<juce::AudioPluginInstance> inst,
-                                             const juce::String& err)
+            [this, alive, d, done, state, bypassed](std::unique_ptr<juce::AudioPluginInstance> inst,
+                                                    const juce::String& err)
             {
+                if (alive.expired())
+                    return;     // the rack was destroyed while this plugin was loading
+
                 if (inst == nullptr)
                 {
                     if (done) done(err.isEmpty() ? "Could not load plugin" : err);
@@ -191,7 +252,10 @@ public:
     void setBypassed(int i, bool b)
     {
         if (i >= 0 && i < getNumSlots())
+        {
             slots[(size_t) i].node->setBypassed(b);
+            notifyLatency();
+        }
     }
 
     void openEditor(int i)
@@ -213,15 +277,15 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // Rack files: plugin descriptions + state + bypass + master gain.
-    bool saveRack(const juce::File& file) const
+    // Rack state: plugin descriptions + state + bypass + master gain.
+    std::unique_ptr<juce::XmlElement> createRackXml() const
     {
-        juce::XmlElement root("Rack");
-        root.setAttribute("gain", (double) getMasterGain());
+        auto root = std::make_unique<juce::XmlElement>("Rack");
+        root->setAttribute("gain", (double) getMasterGain());
 
         for (auto& s : slots)
         {
-            auto* e = root.createNewChildElement("Slot");
+            auto* e = root->createNewChildElement("Slot");
             e->addChildElement(s.desc.createXml().release());
             e->setAttribute("bypass", s.node->isBypassed());
 
@@ -229,12 +293,18 @@ public:
             s.node->getProcessor()->getStateInformation(mb);
             e->setAttribute("state", mb.toBase64Encoding());
         }
-        return root.writeTo(file);
+        return root;
     }
 
-    void loadRack(const juce::File& file, std::function<void(const juce::String&)> done)
+    bool saveRack(const juce::File& file) const
     {
-        std::shared_ptr<juce::XmlElement> xml(juce::parseXML(file).release());
+        auto xml = createRackXml();
+        return xml->writeTo(file);
+    }
+
+    void loadRackXml(std::shared_ptr<juce::XmlElement> xml,
+                     std::function<void(const juce::String&)> done)
+    {
         if (xml == nullptr || ! xml->hasTagName("Rack"))
         {
             if (done) done("Not a valid rack file");
@@ -246,6 +316,12 @@ public:
 
         setMasterGain((float) xml->getDoubleAttribute("gain", 1.0));
         loadNext(xml, 0, std::move(done));
+    }
+
+    void loadRack(const juce::File& file, std::function<void(const juce::String&)> done)
+    {
+        std::shared_ptr<juce::XmlElement> xml(juce::parseXML(file).release());
+        loadRackXml(xml, std::move(done));
     }
 
 private:
@@ -298,7 +374,18 @@ private:
         link(gainNode->nodeID, audioOut->nodeID);
     }
 
-    void notify() { if (onChanged) onChanged(); }
+    void notify()
+    {
+        if (onChanged) onChanged();
+        notifyLatency();
+    }
+
+    void notifyLatency() { if (onLatencyChanged) onLatencyChanged(); }
+
+    const bool ownsDevice;
+    double sampleRate = 44100.0;
+    int blockSize = 512;
+    std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
 
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorPlayer player;

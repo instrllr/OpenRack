@@ -1,5 +1,15 @@
 #include "MainComponent.h"
 
+// The standalone app: owns a rack that opens its own audio device. The engine is
+// a base class so it is built before, and destroyed after, the UI that uses it.
+struct EngineHolder { RackEngine engine { true }; };
+
+class StandaloneRack : private EngineHolder, public MainComponent
+{
+public:
+    StandaloneRack() : MainComponent(engine) {}
+};
+
 class OpenRackApplication : public juce::JUCEApplication
 {
 public:
@@ -27,7 +37,7 @@ public:
             : DocumentWindow(name, Theme::background(), DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
-            setContentOwned(new MainComponent(), true);
+            setContentOwned(new StandaloneRack(), true);
             setResizable(true, true);
             centreWithSize(getWidth(), getHeight());
             setVisible(true);

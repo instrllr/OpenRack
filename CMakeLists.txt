@@ -32,3 +32,45 @@ target_link_libraries(OpenRack PRIVATE
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+#------------------------------------------------------------------------------
+# Plugin version: OpenRack as an effect plugin that runs inside a DAW.
+#   VST3 for FL Studio / Ableton (Windows, macOS, Linux)
+#   AU   for Logic Pro (macOS only; Logic does not load VST3)
+set(OPENRACK_PLUGIN_FORMATS VST3)
+if(APPLE)
+    list(APPEND OPENRACK_PLUGIN_FORMATS AU)
+endif()
+
+juce_add_plugin(OpenRackPlugin
+    PRODUCT_NAME "OpenRack"
+    COMPANY_NAME "OpenRack"
+    BUNDLE_ID "com.openrack.OpenRack"
+    PLUGIN_MANUFACTURER_CODE Orck
+    PLUGIN_CODE Orak
+    FORMATS ${OPENRACK_PLUGIN_FORMATS}
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    VST3_CATEGORIES Fx
+    AU_MAIN_TYPE kAudioUnitType_Effect)
+
+target_sources(OpenRackPlugin PRIVATE Source/PluginProcessor.cpp)
+
+target_compile_definitions(OpenRackPlugin PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_PLUGINHOST_VST3=1)
+
+if(APPLE)
+    target_compile_definitions(OpenRackPlugin PUBLIC JUCE_PLUGINHOST_AU=1)
+endif()
+
+target_link_libraries(OpenRackPlugin PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_gui_extra
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
