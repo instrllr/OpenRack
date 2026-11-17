@@ -36,3 +36,9 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 - MIDI routing and instrument plugins
 - Parallel chains and per-slot gain
 - Plugin sandboxing
+
+# DISCLAIMER
+
+This software is made entirely by vibecoding.
+if this is not your cup of tea, you do not have to use it.
+i am simply making this mostly for myself but it is available to anyone who wants to use this software for their live events and do not want to pay for Waves SuperRack Performer.
