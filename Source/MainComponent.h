@@ -388,6 +388,204 @@ private:
 };
 
 //==============================================================================
+// One input bus of the plugin version: mute, solo, gain and a level meter.
+class InputStrip : public juce::Component, private juce::Timer
+{
+public:
+    static constexpr int kHeight = 38;
+
+    InputStrip(RackEngine& e, int index) : engine(e), idx(index)
+    {
+        mute.setButtonText("M");
+        solo.setButtonText("S");
+        mute.setClickingTogglesState(true);
+        solo.setClickingTogglesState(true);
+        mute.setTooltip("Mute this input");
+        solo.setTooltip("Solo this input");
+        mute.setColour(juce::TextButton::buttonOnColourId, Theme::warning());
+        solo.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3ddc84));
+        mute.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+        solo.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+        addAndMakeVisible(mute);
+        addAndMakeVisible(solo);
+
+        gain.setSliderStyle(juce::Slider::LinearHorizontal);
+        gain.setRange(-60.0, 12.0, 0.1);
+        gain.setDoubleClickReturnValue(true, 0.0);
+        gain.setTextValueSuffix(" dB");
+        gain.setTextBoxStyle(juce::Slider::TextBoxRight, false, 68, 20);
+        gain.setTooltip("Level this input is mixed into the rack at (double-click for 0 dB)");
+        addAndMakeVisible(gain);
+
+        mute.onClick = [this] { bus().mute.store(mute.getToggleState()); };
+        solo.onClick = [this] { bus().solo.store(solo.getToggleState()); };
+        gain.onValueChange = [this]
+        {
+            bus().gain.store(juce::Decibels::decibelsToGain((float) gain.getValue(), -60.0f));
+        };
+
+        sync();
+        setAlpha(0.5f);
+        startTimerHz(20);
+    }
+
+    // Pull the controls into line with the engine (after loading a rack or snapshot).
+    void sync()
+    {
+        gain.setValue(juce::Decibels::gainToDecibels(bus().gain.load(), -60.0f), juce::dontSendNotification);
+        mute.setToggleState(bus().mute.load(), juce::dontSendNotification);
+        solo.setToggleState(bus().solo.load(), juce::dontSendNotification);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced(2.0f, 2.0f);
+        g.setColour(Theme::row());
+        g.fillRoundedRectangle(r, 6.0f);
+
+        g.setColour(lastActive ? Theme::text() : Theme::muted());
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText("IN " + juce::String(idx + 1), 14, 0, 50, getHeight(), juce::Justification::centredLeft);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(11.0f));
+        g.drawText(idx == 0 ? "main" : (lastActive ? "on" : "off"), 56, 0, 40, getHeight(),
+                   juce::Justification::centredLeft);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto bar = juce::Rectangle<float>((float) meterArea.getX(),
+                                              (float) meterArea.getCentreY() - 6.0f + (float) ch * 8.0f,
+                                              (float) meterArea.getWidth(), 5.0f);
+            g.setColour(Theme::control());
+            g.fillRoundedRectangle(bar, 2.5f);
+
+            const float db = juce::Decibels::gainToDecibels(level[ch], -60.0f);
+            const float frac = juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 66.0f);
+            if (frac > 0.0f)
+            {
+                g.setColour(db > -1.0f ? juce::Colour(0xffff5252) : db > -12.0f ? Theme::warning()
+                                                                                : juce::Colour(0xff3ddc84));
+                g.fillRoundedRectangle(bar.withWidth(juce::jmax(5.0f, bar.getWidth() * frac)), 2.5f);
+            }
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(6, 6);
+        r.removeFromLeft(92);
+        mute.setBounds(r.removeFromLeft(28));
+        r.removeFromLeft(4);
+        solo.setBounds(r.removeFromLeft(28));
+        r.removeFromLeft(8);
+        meterArea = r.removeFromRight(juce::jmin(150, r.getWidth() / 3)).reduced(0, 0);
+        r.removeFromRight(10);
+        gain.setBounds(r);
+    }
+
+private:
+    RackEngine::InputBus& bus() { return engine.inputBuses[(size_t) idx]; }
+
+    void timerCallback() override
+    {
+        if (! isShowing())
+            return;
+
+        const bool on = bus().active.load();
+        if (on != lastActive)
+        {
+            lastActive = on;
+            setAlpha(on ? 1.0f : 0.5f);
+        }
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const float raw = (ch == 0 ? bus().peakL : bus().peakR).exchange(0.0f);
+            level[ch] = juce::jmax(raw, level[ch] * 0.88f);
+        }
+        repaint();
+    }
+
+    RackEngine& engine;
+    const int idx;
+    juce::TextButton mute, solo;
+    juce::Slider gain;
+    juce::Rectangle<int> meterArea;
+    float level[2] { 0.0f, 0.0f };
+    bool lastActive = false;
+};
+
+// Full-width view listing all 64 input buses (plugin version only).
+class InputsPanel : public juce::Component
+{
+public:
+    explicit InputsPanel(RackEngine& e)
+    {
+        for (int i = 0; i < kMaxInputBuses; ++i)
+        {
+            strips.push_back(std::make_unique<InputStrip>(e, i));
+            content.addAndMakeVisible(*strips.back());
+        }
+        viewport.setViewedComponent(&content, false);
+        viewport.setScrollBarsShown(true, false);
+        addAndMakeVisible(viewport);
+    }
+
+    void sync() { for (auto& s : strips) s->sync(); }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(Theme::background());
+        auto p = getLocalBounds().toFloat();
+        g.setColour(Theme::panel());
+        g.fillRoundedRectangle(p, 10.0f);
+        g.setColour(Theme::outline());
+        g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+        g.drawText("INPUT BUSES  -  " + juce::String(kMaxInputBuses) + " stereo inputs mixed into the rack",
+                   16, 8, getWidth() - 32, 20, juce::Justification::centredLeft);
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText("Inputs your DAW has switched on are lit. FL Studio: send a mixer track to an OpenRack input. "
+                   "Logic Pro: input 2 is the side-chain.",
+                   16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
+    }
+
+    void resized() override
+    {
+        viewport.setBounds(getLocalBounds().withTrimmedTop(54).reduced(8, 6));
+        const int w = juce::jmax(100, viewport.getMaximumVisibleWidth());
+        content.setSize(w, kMaxInputBuses * InputStrip::kHeight);
+        for (size_t i = 0; i < strips.size(); ++i)
+            strips[i]->setBounds(0, (int) i * InputStrip::kHeight, w, InputStrip::kHeight);
+    }
+
+private:
+    juce::Viewport viewport;
+    juce::Component content;
+    std::vector<std::unique_ptr<InputStrip>> strips;
+};
+
+// Snapshot button: left click recalls (or stores into an empty slot), right click opens a menu.
+class SnapButton : public juce::TextButton
+{
+public:
+    std::function<void()> onRightClick;
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu())
+        {
+            if (onRightClick) onRightClick();
+            return;
+        }
+        juce::TextButton::mouseDown(e);
+    }
+};
+
+//==============================================================================
 class MainComponent : public juce::Component,
                       public juce::DragAndDropContainer,
                       public juce::DragAndDropTarget,
@@ -416,11 +614,15 @@ public:
             juce::Component::SafePointer<MainComponent> safe(this);
             juce::MessageManager::callAsync([safe]
             {
-                if (safe != nullptr) safe->refresh();
+                if (safe != nullptr)
+                {
+                    safe->autosaveDirty = true;
+                    safe->refresh();
+                }
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -429,6 +631,8 @@ public:
         loadBtn.setButtonText("Load rack");
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
+        inputsBtn.setButtonText("Inputs");
+        inputsBtn.setTooltip("Mix the 64 input buses your DAW can send to OpenRack");
 
         scanBtn.setTooltip("Find the plugins installed on this computer");
         audioBtn.setTooltip("Choose the audio device, sample rate and buffer size");
@@ -445,6 +649,25 @@ public:
         loadBtn.onClick = [this] { loadRack(); };
         bypassAllBtn.onClick = [this] { engine.setAllBypassed(! engine.areAllBypassed()); };
         clearBtn.onClick = [this] { confirmClear(); };
+        inputsBtn.onClick = [this] { toggleInputs(); };
+
+        // Snapshot buttons
+        addAndMakeVisible(snapLabel);
+        snapLabel.setText("SNAP", juce::dontSendNotification);
+        snapLabel.setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
+        snapLabel.setColour(juce::Label::textColourId, Theme::muted());
+        for (int i = 0; i < kNumSnapshots; ++i)
+        {
+            auto& b = snapBtns[(size_t) i];
+            b.setButtonText(juce::String(i + 1));
+            b.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+            b.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+            b.setTooltip("Snapshot " + juce::String(i + 1)
+                         + ": click to recall it (or store the rack here if empty). Right-click for more.");
+            b.onClick = [this, i] { snapshotClicked(i); };
+            b.onRightClick = [this, i] { showSnapshotMenu(i); };
+            addAndMakeVisible(b);
+        }
 
         // Plugin search
         searchBox.setTextToShowWhenEmpty("Search plugins by name, maker or type...", Theme::muted());
@@ -490,6 +713,8 @@ public:
 
         // As a plugin the DAW owns the audio device, so there is nothing to configure.
         audioBtn.setVisible(engine.ownsAudioDevice());
+        inputsBtn.setVisible(! engine.ownsAudioDevice());
+        addChildComponent(inputsPanel);
 
         // Inline plugin editors (used when running inside a DAW).
         addChildComponent(editorHost);
@@ -513,11 +738,14 @@ public:
         refresh();
         timerCallback();
         startTimerHz(2);
+        checkLastSession();
     }
 
     ~MainComponent() override
     {
         stopTimer();
+        if (engine.ownsAudioDevice())
+            lockFile.deleteFile();      // a clean exit: nothing to recover next time
         engine.onOpenEditorRequested = nullptr;
         engine.onBeforeSlotRemoved = nullptr;
         editorHost.clear();
@@ -617,7 +845,7 @@ public:
 
     void paintOverChildren(juce::Graphics& g) override
     {
-        if (editorHost.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible())
             return;
 
         // Magnifier icon inside the search box
@@ -659,7 +887,7 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &hotBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &saveBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
@@ -673,6 +901,8 @@ public:
 
         masterBar = r.removeFromBottom(54);
         r.removeFromBottom(12);
+        inputsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
+                              r.getBottom() - hotStrip.getY());
         auto inner = masterBar.reduced(14, 7);
         gainLabel.setBounds(inner.removeFromLeft(64));
         meter.setBounds(inner.removeFromRight(230));
@@ -695,6 +925,14 @@ public:
         bypassAllBtn.setBounds(actions.removeFromLeft(112).reduced(0, 2));
         actions.removeFromLeft(8);
         clearBtn.setBounds(actions.removeFromLeft(104).reduced(0, 2));
+        actions.removeFromLeft(10);
+        snapLabel.setBounds(actions.removeFromLeft(44));
+        const int snapW = juce::jlimit(20, 32, actions.getWidth() / kNumSnapshots - 3);
+        for (auto& b : snapBtns)
+        {
+            b.setBounds(actions.removeFromLeft(snapW).reduced(0, 2));
+            actions.removeFromLeft(3);
+        }
         r.removeFromTop(8);
         rackPanel = r;
         rackList.setBounds(r.reduced(6));
@@ -706,7 +944,7 @@ public:
     // Drag and drop: plugins (from the list or hot strip) and rack rows
     bool isInterestedInDragSource(const SourceDetails& d) override
     {
-        if (editorHost.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible())
             return false;
         const auto s = d.description.toString();
         return s.startsWith("add:") || s.startsWith("move:");
@@ -738,7 +976,7 @@ public:
     // Dropping plugin files (.vst3 / .component) onto the window scans and adds them.
     bool isInterestedInFileDrag(const juce::StringArray& files) override
     {
-        if (editorHost.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible())
             return false;
         for (auto& f : files)
             if (isPluginFile(f)) return true;
@@ -933,6 +1171,44 @@ private:
     // Adds a plugin, optionally at a specific position, and counts it as "used".
     void addPluginDesc(const juce::PluginDescription& d, int insertAt = -1)
     {
+        // Standalone app: a plugin seen for the first time is run in a separate
+        // process first, so one that crashes cannot take OpenRack down with it.
+        if (engine.ownsAudioDevice() && ! engine.safety.isBlocked(d.createIdentifierString())
+            && ! engine.safety.isVerified(d))
+        {
+            juce::Component::SafePointer<MainComponent> safe(this);
+            ++checking;
+            checkingName = d.name;
+            timerCallback();
+
+            PluginSafety::runPreflight(d, [safe, d, insertAt](bool ok, const juce::String& message)
+            {
+                if (safe == nullptr)
+                    return;
+
+                --safe->checking;
+                safe->timerCallback();
+
+                if (! ok)
+                {
+                    safe->engine.safety.block(d.createIdentifierString());
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::MessageBoxIconType::WarningIcon, "Plugin blocked",
+                        message + "\n\nRight-click it in the list and choose \"Unblock plugin\" to try again.");
+                    return;
+                }
+
+                safe->engine.safety.setVerified(d);
+                safe->addPluginNow(d, insertAt);
+            });
+            return;
+        }
+
+        addPluginNow(d, insertAt);
+    }
+
+    void addPluginNow(const juce::PluginDescription& d, int insertAt)
+    {
         juce::Component::SafePointer<MainComponent> safe(this);
         const auto id = d.createIdentifierString();
 
@@ -1122,6 +1398,11 @@ private:
         m.addItem(1, "Add to rack");
         m.addItem(2, pinned ? "Unpin from hot plugins" : "Pin to hot plugins");
         m.addItem(3, "Remove from hot plugins", pinned || hot.getUseCount(id) > 0);
+        if (engine.safety.isBlocked(id))
+        {
+            m.addSeparator();
+            m.addItem(4, "Unblock plugin");
+        }
 
         juce::Component::SafePointer<MainComponent> safe(this);
         m.showMenuAsync(juce::PopupMenu::Options(), [safe, id](int r)
@@ -1136,6 +1417,7 @@ private:
             }
             else if (r == 2) { safe->hot.togglePin(id); safe->afterHotChanged(); }
             else if (r == 3) { safe->hot.forget(id);    safe->afterHotChanged(); }
+            else if (r == 4) { safe->engine.safety.unblock(id); }
         });
     }
 
@@ -1192,6 +1474,118 @@ private:
         });
     }
 
+    void toggleInputs()
+    {
+        const bool show = ! inputsPanel.isVisible();
+        if (show)
+        {
+            if (editorHost.isVisible())
+                closeInlineEditor(true);
+            inputsPanel.sync();
+        }
+        inputsPanel.setVisible(show);
+        if (show)
+            inputsPanel.toFront(false);
+        inputsBtn.setButtonText(show ? "Rack" : "Inputs");
+        repaint();
+    }
+
+    void snapshotClicked(int i)
+    {
+        if (engine.hasSnapshot(i))
+            recallSnapshot(i);
+        else
+            engine.storeSnapshot(i);
+    }
+
+    void recallSnapshot(int i)
+    {
+        engine.recallSnapshot(i, [](const juce::String& err)
+        {
+            if (err.isNotEmpty())
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Snapshot", err);
+        });
+    }
+
+    void showSnapshotMenu(int i)
+    {
+        juce::PopupMenu m;
+        m.addItem(1, "Store current rack in snapshot " + juce::String(i + 1));
+        m.addItem(2, "Recall snapshot " + juce::String(i + 1), engine.hasSnapshot(i));
+        m.addItem(3, "Clear snapshot " + juce::String(i + 1), engine.hasSnapshot(i));
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, i](int r)
+        {
+            if (safe == nullptr) return;
+            if (r == 1)      safe->engine.storeSnapshot(i);
+            else if (r == 2) safe->recallSnapshot(i);
+            else if (r == 3) safe->engine.clearSnapshot(i);
+        });
+    }
+
+    // Standalone app: offer to restore the last rack if OpenRack did not exit cleanly,
+    // and say so if a plugin was blocked because it crashed while loading.
+    void checkLastSession()
+    {
+        juce::String notice;
+        const auto suspect = engine.takeSuspectAtStartup();
+        if (suspect.isNotEmpty())
+        {
+            juce::String name = suspect.fromFirstOccurrenceOf("-", false, false)
+                                       .upToLastOccurrenceOf("-", false, false)
+                                       .upToLastOccurrenceOf("-", false, false);
+            if (auto d = engine.knownPlugins.getTypeForIdentifierString(suspect))
+                name = d->name;
+            notice = name + " was loading when the last session ended unexpectedly, so it has been blocked. "
+                            "You can unblock it by right-clicking it in the plugin list.";
+        }
+
+        bool canRestore = false;
+        if (engine.ownsAudioDevice())
+        {
+            canRestore = lockFile.existsAsFile() && autosaveFile.existsAsFile();
+            lockFile.replaceWithText("running");
+            autosaveArmed = ! canRestore;
+        }
+
+        if (notice.isEmpty() && ! canRestore)
+            return;
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::MessageManager::callAsync([safe, notice, canRestore]
+        {
+            if (safe == nullptr)
+                return;
+
+            if (! canRestore)
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Plugin blocked", notice);
+                return;
+            }
+
+            juce::AlertWindow::showAsync(
+                juce::MessageBoxOptions::makeOptionsOkCancel(
+                    juce::MessageBoxIconType::WarningIcon, "OpenRack closed unexpectedly",
+                    (notice.isNotEmpty() ? notice + "\n\n" : juce::String()) + "Restore your last rack?",
+                    "Restore", "Start empty", safe.getComponent()),
+                [safe](int result)
+                {
+                    if (safe == nullptr)
+                        return;
+
+                    if (result == 1)
+                        safe->engine.loadRack(safe->autosaveFile, [safe](const juce::String&)
+                        {
+                            if (safe != nullptr) safe->autosaveArmed = true;
+                        });
+                    else
+                        safe->autosaveArmed = true;
+                });
+        });
+    }
+
     void confirmClear()
     {
         if (engine.getNumSlots() == 0)
@@ -1228,6 +1622,15 @@ private:
         if (lat > 0)
             title += "  -  latency " + juce::String(lat) + " smp";
         rackTitle.setText(title, juce::dontSendNotification);
+
+        for (int i = 0; i < kNumSnapshots; ++i)
+        {
+            auto& b = snapBtns[(size_t) i];
+            b.setToggleState(engine.getCurrentSnapshot() == i, juce::dontSendNotification);
+            b.setColour(juce::TextButton::textColourOffId, engine.hasSnapshot(i) ? Theme::text() : Theme::muted());
+        }
+        if (inputsPanel.isVisible())
+            inputsPanel.sync();
 
         bypassAllBtn.setButtonText(engine.areAllBypassed() ? "Enable all" : "Bypass all");
         bypassAllBtn.setEnabled(n > 0);
@@ -1270,6 +1673,15 @@ private:
         else
         {
             s = "No audio device - open Audio settings";
+        }
+
+        if (checking > 0)
+            s = "Checking " + checkingName + " in a separate process before loading it...";
+
+        if (autosaveArmed && autosaveDirty && engine.ownsAudioDevice())
+        {
+            autosaveDirty = false;
+            engine.saveRack(autosaveFile);
         }
 
         if (s != statusText)
@@ -1391,7 +1803,15 @@ private:
     int totalEffects = 0;
     juce::ListBox pluginList, rackList;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn;
+    std::array<SnapButton, kNumSnapshots> snapBtns;
+    juce::Label snapLabel;
+    InputsPanel inputsPanel { engine };
+    int checking = 0;
+    juce::String checkingName;
+    juce::File lockFile = getDataDir().getChildFile("session.lock");
+    juce::File autosaveFile = getDataDir().getChildFile("autosave.orack");
+    bool autosaveArmed = false, autosaveDirty = false;
     juce::Slider gainSlider;
     juce::Label gainLabel, pluginTitle, rackTitle;
     juce::Rectangle<int> pluginPanel, rackPanel, statusBar, hotStrip, masterBar;

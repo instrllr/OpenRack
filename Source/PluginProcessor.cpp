@@ -22,17 +22,30 @@ private:
 class OpenRackProcessor : public juce::AudioProcessor
 {
 public:
-    OpenRackProcessor()
-        : AudioProcessor(BusesProperties()
-                             .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                             .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-          engine(false)
+    // VST3 (FL Studio, Ableton): the main input plus up to 63 more stereo inputs a
+    // mixer track can be sent to. AU (Logic Pro) only offers one extra input (the
+    // side-chain), so it exposes just two.
+    static BusesProperties makeBuses()
+    {
+        const bool isAU = juce::PluginHostType::getPluginLoadedAs() == juce::AudioProcessor::wrapperType_AudioUnit;
+        const int numInputs = isAU ? 2 : kMaxInputBuses;
+
+        auto b = BusesProperties()
+                     .withInput("Input 1", juce::AudioChannelSet::stereo(), true)
+                     .withOutput("Output", juce::AudioChannelSet::stereo(), true);
+
+        for (int i = 2; i <= numInputs; ++i)
+            b = b.withInput("Input " + juce::String(i), juce::AudioChannelSet::stereo(), false);
+        return b;
+    }
+
+    OpenRackProcessor() : AudioProcessor(makeBuses()), engine(false)
     {
         // Tell the host how much delay the plugins in the rack add.
         engine.onLatencyChanged = [this] { setLatencySamples(engine.getTotalLatency()); };
     }
 
-    ~OpenRackProcessor() override { engine.onLatencyChanged = nullptr; }
+    ~OpenRackProcessor() override { aliveToken.reset(); engine.onLatencyChanged = nullptr; }
 
     RackEngine& getEngine() { return engine; }
 
@@ -47,14 +60,27 @@ public:
 
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override
     {
-        return layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo()
-            && layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+        if (layouts.getMainInputChannelSet() != juce::AudioChannelSet::stereo()
+            || layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+            return false;
+
+        // Every extra input is either switched off or stereo.
+        for (const auto& in : layouts.inputBuses)
+            if (! in.isDisabled() && in != juce::AudioChannelSet::stereo())
+                return false;
+
+        return true;
     }
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
     {
         juce::ScopedNoDenormals noDenormals;
-        engine.process(buffer, midi);
+
+        // Mix the patched-in input buses, then run the rack on the stereo result.
+        engine.applyInputMix(*this, buffer);
+
+        juce::AudioBuffer<float> stereo(buffer.getArrayOfWritePointers(), 2, buffer.getNumSamples());
+        engine.process(stereo, midi);
     }
 
     double getTailLengthSeconds() const override { return engine.getTotalTailSeconds(); }
@@ -64,10 +90,29 @@ public:
     juce::AudioProcessorEditor* createEditor() override { return new OpenRackEditor(*this); }
     bool hasEditor() const override { return true; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
+    // The eight snapshots are the plugin's programs, so a DAW can automate or
+    // recall them from its own program-change controls.
+    int getNumPrograms() override { return kNumSnapshots; }
+    int getCurrentProgram() override { return juce::jmax(0, engine.getCurrentSnapshot()); }
+
+    void setCurrentProgram(int i) override
+    {
+        if (i == engine.getCurrentSnapshot() || ! engine.hasSnapshot(i))
+            return;
+
+        std::weak_ptr<int> alive = aliveToken;
+        juce::MessageManager::callAsync([this, alive, i]
+        {
+            if (! alive.expired())
+                engine.recallSnapshot(i);
+        });
+    }
+
+    const juce::String getProgramName(int i) override
+    {
+        return "Snapshot " + juce::String(i + 1) + (engine.hasSnapshot(i) ? "" : " (empty)");
+    }
+
     void changeProgramName(int, const juce::String&) override {}
 
     // The whole rack (plugins, their settings, bypass, master gain) is saved
@@ -88,6 +133,7 @@ public:
     }
 
 private:
+    std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
     RackEngine engine;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenRackProcessor)

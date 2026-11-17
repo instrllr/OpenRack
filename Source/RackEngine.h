@@ -1,8 +1,13 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <array>
 #include <map>
 #include <memory>
+#include "Sandbox.h"
+
+static constexpr int kMaxInputBuses = 64;     // stereo input buses a DAW can patch into OpenRack
+static constexpr int kNumSnapshots = 8;
 
 //==============================================================================
 // Simple master gain stage at the end of the chain, with peak metering.
@@ -93,14 +98,30 @@ public:
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPlugins;
     juce::AudioDeviceManager deviceManager;     // only used when ownsAudioDevice
+    PluginSafety safety { getDataDirectory() }; // block list, crash marker, pre-flight cache
+
+    // One stereo input bus of the plugin version, with its own mixer strip.
+    struct InputBus
+    {
+        std::atomic<float> gain { 1.0f };
+        std::atomic<bool> mute { false }, solo { false }, active { false };
+        std::atomic<float> peakL { 0.0f }, peakR { 0.0f };
+    };
+    std::array<InputBus, kMaxInputBuses> inputBuses;
     std::function<void()> onChanged;            // rack contents changed (message thread)
     std::function<void()> onLatencyChanged;     // total latency may have changed
     std::function<void(int)> onOpenEditorRequested;           // plugin mode: show a slot's editor inline
     std::function<void(juce::uint32)> onBeforeSlotRemoved;    // a hosted plugin is about to be deleted
 
+    static juce::File getDataDirectory()
+    {
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("OpenRack");
+    }
+
     explicit RackEngine(bool ownsAudioDevice = true) : ownsDevice(ownsAudioDevice)
     {
         formatManager.addDefaultFormats();
+        suspectAtStartup = safety.takeStaleMarker();
 
         graph.setPlayConfigDetails(2, 2, sampleRate, blockSize);
         audioIn = graph.addNode(std::make_unique<juce::AudioProcessorGraph::AudioGraphIOProcessor>(
@@ -173,6 +194,127 @@ public:
     }
 
     //--------------------------------------------------------------------------
+    // Plugin mode: mixes every enabled input bus the DAW has patched in (bus 0 is
+    // the main input) into the stereo signal that feeds the rack.
+    void applyInputMix(juce::AudioProcessor& host, juce::AudioBuffer<float>& buffer)
+    {
+        const int n = buffer.getNumSamples();
+        const int numBuses = juce::jmin(host.getBusCount(true), kMaxInputBuses);
+
+        bool anySolo = false;
+        for (int i = 0; i < kMaxInputBuses; ++i)
+        {
+            auto& b = inputBuses[(size_t) i];
+            const bool on = i < numBuses && host.getBus(true, i)->isEnabled();
+            b.active.store(on, std::memory_order_relaxed);
+            if (on && b.solo.load(std::memory_order_relaxed))
+                anySolo = true;
+        }
+
+        for (int i = 0; i < numBuses; ++i)
+        {
+            auto& b = inputBuses[(size_t) i];
+            if (! b.active.load(std::memory_order_relaxed))
+                continue;
+
+            auto bb = host.getBusBuffer(buffer, true, i);
+            if (bb.getNumChannels() < 2 || n == 0)
+                continue;
+
+            raisePeak(b.peakL, bb.getMagnitude(0, 0, n));
+            raisePeak(b.peakR, bb.getMagnitude(1, 0, n));
+
+            const bool audible = ! b.mute.load() && (! anySolo || b.solo.load());
+            const float g = audible ? b.gain.load() : 0.0f;
+
+            if (i == 0)
+            {
+                bb.applyGain(g);
+            }
+            else if (g > 0.0f)
+            {
+                buffer.addFrom(0, 0, bb, 0, 0, n, g);
+                buffer.addFrom(1, 0, bb, 1, 0, n, g);
+            }
+        }
+    }
+
+    //--------------------------------------------------------------------------
+    // Snapshots: eight stored racks. If a snapshot has the same plugins in the
+    // same order the switch is instant (only settings change); otherwise the
+    // plugins are reloaded.
+    bool hasSnapshot(int i) const { return i >= 0 && i < kNumSnapshots && snapshots[(size_t) i] != nullptr; }
+    int getCurrentSnapshot() const { return currentSnapshot; }
+
+    void storeSnapshot(int i)
+    {
+        if (i < 0 || i >= kNumSnapshots) return;
+        snapshots[(size_t) i].reset(createCoreXml().release());
+        currentSnapshot = i;
+        notify();
+    }
+
+    void clearSnapshot(int i)
+    {
+        if (! hasSnapshot(i)) return;
+        snapshots[(size_t) i].reset();
+        if (currentSnapshot == i) currentSnapshot = -1;
+        notify();
+    }
+
+    void recallSnapshot(int i, std::function<void(const juce::String&)> done = {})
+    {
+        if (! hasSnapshot(i))
+        {
+            if (done) done("That snapshot is empty.");
+            return;
+        }
+
+        auto xml = snapshots[(size_t) i];
+        currentSnapshot = i;
+
+        std::vector<juce::XmlElement*> els;
+        for (auto* e : xml->getChildWithTagNameIterator("Slot"))
+            els.push_back(e);
+
+        bool same = els.size() == slots.size();
+        for (size_t k = 0; same && k < els.size(); ++k)
+        {
+            juce::PluginDescription d;
+            auto* dx = els[k]->getFirstChildElement();
+            same = dx != nullptr && d.loadFromXml(*dx)
+                   && d.createIdentifierString() == slots[k].desc.createIdentifierString();
+        }
+
+        if (same)
+        {
+            for (size_t k = 0; k < els.size(); ++k)
+            {
+                juce::MemoryBlock mb;
+                mb.fromBase64Encoding(els[k]->getStringAttribute("state"));
+                if (mb.getSize() > 0)
+                    slots[k].node->getProcessor()->setStateInformation(mb.getData(), (int) mb.getSize());
+                slots[k].node->setBypassed(els[k]->getBoolAttribute("bypass"));
+            }
+            setMasterGain((float) xml->getDoubleAttribute("gain", 1.0));
+            applyInputsXml(*xml);
+            notify();
+            if (done) done({});
+            return;
+        }
+
+        loadCore(xml, std::move(done));
+    }
+
+    // The plugin that was loading when the last session crashed (it is now blocked).
+    juce::String takeSuspectAtStartup()
+    {
+        auto s = suspectAtStartup;
+        suspectAtStartup.clear();
+        return s;
+    }
+
+    //--------------------------------------------------------------------------
     int getNumSlots() const { return (int) slots.size(); }
     const Slot& getSlot(int i) const { return slots[(size_t) i]; }
 
@@ -211,13 +353,27 @@ public:
             }
         }
 
+        const auto pluginId = d.createIdentifierString();
+        if (safety.isBlocked(pluginId))
+        {
+            if (done)
+                done(d.name + " is blocked because it crashed earlier. Right-click it in the list "
+                              "and choose \"Unblock plugin\" to try again.");
+            return;
+        }
+
+        const auto marker = safety.getMarkerFile();
+        safety.markLoading(pluginId);
+
         std::weak_ptr<int> alive = aliveToken;
 
         formatManager.createPluginInstanceAsync(
             d, sr, bs,
-            [this, alive, d, done, state, bypassed](std::unique_ptr<juce::AudioPluginInstance> inst,
-                                                    const juce::String& err)
+            [this, alive, d, done, state, bypassed, marker](std::unique_ptr<juce::AudioPluginInstance> inst,
+                                                            const juce::String& err)
             {
+                marker.deleteFile();      // the plugin got through loading
+
                 if (alive.expired())
                     return;     // the rack was destroyed while this plugin was loading
 
@@ -347,7 +503,8 @@ public:
 
     //--------------------------------------------------------------------------
     // Rack state: plugin descriptions + state + bypass + master gain.
-    std::unique_ptr<juce::XmlElement> createRackXml() const
+    // The rack as it is right now (plugins, settings, bypass, master gain, input mixer).
+    std::unique_ptr<juce::XmlElement> createCoreXml() const
     {
         auto root = std::make_unique<juce::XmlElement>("Rack");
         root->setAttribute("gain", (double) getMasterGain());
@@ -362,6 +519,36 @@ public:
             s.node->getProcessor()->getStateInformation(mb);
             e->setAttribute("state", mb.toBase64Encoding());
         }
+
+        auto* inputs = root->createNewChildElement("Inputs");
+        for (int i = 0; i < kMaxInputBuses; ++i)
+        {
+            auto& b = inputBuses[(size_t) i];
+            if (b.gain.load() == 1.0f && ! b.mute.load() && ! b.solo.load())
+                continue;
+            auto* e = inputs->createNewChildElement("Bus");
+            e->setAttribute("i", i);
+            e->setAttribute("gain", (double) b.gain.load());
+            e->setAttribute("mute", b.mute.load());
+            e->setAttribute("solo", b.solo.load());
+        }
+        return root;
+    }
+
+    // Everything: the current rack plus all stored snapshots (this is what a DAW project saves).
+    std::unique_ptr<juce::XmlElement> createRackXml() const
+    {
+        auto root = createCoreXml();
+        root->setAttribute("snap", currentSnapshot);
+
+        auto* snaps = root->createNewChildElement("Snapshots");
+        for (int i = 0; i < kNumSnapshots; ++i)
+            if (snapshots[(size_t) i] != nullptr)
+            {
+                auto* e = snaps->createNewChildElement("Snap");
+                e->setAttribute("i", i);
+                e->addChildElement(new juce::XmlElement(*snapshots[(size_t) i]));
+            }
         return root;
     }
 
@@ -380,11 +567,19 @@ public:
             return;
         }
 
-        while (getNumSlots() > 0)
-            removeSlot(0);
+        for (auto& snap : snapshots)
+            snap.reset();
 
-        setMasterGain((float) xml->getDoubleAttribute("gain", 1.0));
-        loadNext(xml, 0, std::move(done));
+        if (auto* snaps = xml->getChildByName("Snapshots"))
+            for (auto* e : snaps->getChildWithTagNameIterator("Snap"))
+            {
+                const int i = e->getIntAttribute("i", -1);
+                if (i >= 0 && i < kNumSnapshots && e->getFirstChildElement() != nullptr)
+                    snapshots[(size_t) i].reset(new juce::XmlElement(*e->getFirstChildElement()));
+            }
+
+        currentSnapshot = hasSnapshot(xml->getIntAttribute("snap", -1)) ? xml->getIntAttribute("snap", -1) : -1;
+        loadCore(xml, std::move(done));
     }
 
     void loadRack(const juce::File& file, std::function<void(const juce::String&)> done)
@@ -396,10 +591,50 @@ public:
 private:
     GainProcessor& gainProc() const { return *static_cast<GainProcessor*>(gainNode->getProcessor()); }
 
-    void loadNext(std::shared_ptr<juce::XmlElement> xml, int idx,
+    // Replaces the plugins with those in a <Rack> element (snapshots are left alone).
+    void loadCore(std::shared_ptr<juce::XmlElement> xml, std::function<void(const juce::String&)> done)
+    {
+        while (getNumSlots() > 0)
+            removeSlot(0);
+
+        setMasterGain((float) xml->getDoubleAttribute("gain", 1.0));
+        applyInputsXml(*xml);
+        loadNext(xml, xml->getFirstChildElement(), std::move(done));
+    }
+
+    void applyInputsXml(const juce::XmlElement& rack)
+    {
+        for (auto& b : inputBuses)
+        {
+            b.gain.store(1.0f);
+            b.mute.store(false);
+            b.solo.store(false);
+        }
+
+        if (auto* inputs = rack.getChildByName("Inputs"))
+            for (auto* e : inputs->getChildWithTagNameIterator("Bus"))
+            {
+                const int i = e->getIntAttribute("i", -1);
+                if (i < 0 || i >= kMaxInputBuses) continue;
+                auto& b = inputBuses[(size_t) i];
+                b.gain.store((float) e->getDoubleAttribute("gain", 1.0));
+                b.mute.store(e->getBoolAttribute("mute"));
+                b.solo.store(e->getBoolAttribute("solo"));
+            }
+    }
+
+    static void raisePeak(std::atomic<float>& a, float v)
+    {
+        if (v > a.load(std::memory_order_relaxed))
+            a.store(v, std::memory_order_relaxed);
+    }
+
+    void loadNext(std::shared_ptr<juce::XmlElement> xml, juce::XmlElement* e,
                   std::function<void(const juce::String&)> done)
     {
-        auto* e = xml->getChildElement(idx);
+        while (e != nullptr && ! e->hasTagName("Slot"))
+            e = e->getNextElement();
+
         if (e == nullptr)
         {
             notify();
@@ -411,14 +646,14 @@ private:
         auto* descXml = e->getFirstChildElement();
         if (descXml == nullptr || ! d.loadFromXml(*descXml))
         {
-            loadNext(xml, idx + 1, done);
+            loadNext(xml, e->getNextElement(), done);
             return;
         }
 
         juce::MemoryBlock mb;
         mb.fromBase64Encoding(e->getStringAttribute("state"));
 
-        addPlugin(d, [this, xml, idx, done](const juce::String&) { loadNext(xml, idx + 1, done); },
+        addPlugin(d, [this, xml, e, done](const juce::String&) { loadNext(xml, e->getNextElement(), done); },
                   mb, e->getBoolAttribute("bypass"));
     }
 
@@ -461,5 +696,8 @@ private:
     juce::AudioProcessorPlayer player;
     juce::AudioProcessorGraph::Node::Ptr audioIn, audioOut, gainNode, inputNode;
     std::vector<Slot> slots;
+    std::array<std::shared_ptr<juce::XmlElement>, kNumSnapshots> snapshots;
+    int currentSnapshot = -1;
+    juce::String suspectAtStartup;
     std::map<juce::uint32, std::unique_ptr<PluginWindow>> windows;
 };

@@ -19,6 +19,18 @@ public:
 
     void initialise(const juce::String&) override
     {
+        // Safety check mode: a short-lived helper process that loads one plugin,
+        // so that a plugin which crashes takes down this helper, not the app.
+        const auto args = getCommandLineParameterArray();
+        const int flag = args.indexOf("--preflight");
+        if (flag >= 0 && args.size() > flag + 2)
+        {
+            const bool ok = PluginSafety::runPreflightChild(juce::File(args[flag + 1]), juce::File(args[flag + 2]));
+            setApplicationReturnValue(ok ? 0 : 1);
+            quit();
+            return;
+        }
+
         juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
         mainWindow = std::make_unique<MainWindow>(getApplicationName());
     }
