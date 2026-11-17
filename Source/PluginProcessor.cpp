@@ -22,20 +22,24 @@ private:
 class OpenRackProcessor : public juce::AudioProcessor
 {
 public:
-    // VST3 (FL Studio, Ableton): the main input plus up to 63 more stereo inputs a
-    // mixer track can be sent to. AU (Logic Pro) only offers one extra input (the
-    // side-chain), so it exposes just two.
+    // VST3 (FL Studio, Ableton): up to 64 stereo inputs and 64 stereo outputs. Each rack
+    // is patched from an input pair to an output pair; the DAW switches the buses on.
+    // AU (Logic Pro) only offers one extra input (the side-chain) and one output, so it
+    // exposes two inputs and just the main output.
     static BusesProperties makeBuses()
     {
         const bool isAU = juce::PluginHostType::getPluginLoadedAs() == juce::AudioProcessor::wrapperType_AudioUnit;
         const int numInputs = isAU ? 2 : kMaxInputBuses;
+        const int numOutputs = isAU ? 1 : kMaxInputBuses;
 
         auto b = BusesProperties()
                      .withInput("Input 1", juce::AudioChannelSet::stereo(), true)
-                     .withOutput("Output", juce::AudioChannelSet::stereo(), true);
+                     .withOutput("Output 1", juce::AudioChannelSet::stereo(), true);
 
         for (int i = 2; i <= numInputs; ++i)
             b = b.withInput("Input " + juce::String(i), juce::AudioChannelSet::stereo(), false);
+        for (int i = 2; i <= numOutputs; ++i)
+            b = b.withOutput("Output " + juce::String(i), juce::AudioChannelSet::stereo(), false);
         return b;
     }
 
@@ -64,9 +68,12 @@ public:
             || layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
             return false;
 
-        // Every extra input is either switched off or stereo.
+        // Every extra input and output is either switched off or stereo.
         for (const auto& in : layouts.inputBuses)
             if (! in.isDisabled() && in != juce::AudioChannelSet::stereo())
+                return false;
+        for (const auto& out : layouts.outputBuses)
+            if (! out.isDisabled() && out != juce::AudioChannelSet::stereo())
                 return false;
 
         return true;
@@ -76,11 +83,8 @@ public:
     {
         juce::ScopedNoDenormals noDenormals;
 
-        // Mix the patched-in input buses, then run the rack on the stereo result.
-        engine.applyInputMix(*this, buffer);
-
-        juce::AudioBuffer<float> stereo(buffer.getArrayOfWritePointers(), 2, buffer.getNumSamples());
-        engine.process(stereo, midi);
+        // Mix the patched-in input buses, run every rack, write the output buses.
+        engine.processHostBuffer(*this, buffer, midi);
     }
 
     double getTailLengthSeconds() const override { return engine.getTotalTailSeconds(); }
@@ -150,8 +154,8 @@ OpenRackEditor::OpenRackEditor(OpenRackProcessor& p) : AudioProcessorEditor(&p)
     content->onRequestSize = [this](int w, int h) { setSize(w, h); };
 
     setResizable(true, true);
-    setResizeLimits(800, 500, 4000, 3000);
-    setSize(1020, 700);
+    setResizeLimits(960, 540, 4000, 3000);
+    setSize(1180, 720);
 }
 
 // Called by the plugin wrapper to create the plugin.

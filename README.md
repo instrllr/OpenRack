@@ -7,14 +7,15 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 
 ## Features
 - Scan and host effect plugins (VST3, plus AudioUnit on macOS); instruments are hidden
-- Serial plugin chain: add, remove, reorder, bypass, open plugin windows (inline when running in a DAW)
+- **Up to 64 stereo racks** (like SuperRack Performer), each with its own plugin chain, fader, mute, solo and meters. A rack is patched from any stereo **input pair** to any stereo **output pair** (standalone: your interface's channels, up to 128 in / 128 out; plugin: the DAW's 64 input and 64 output buses)
+- Serial plugin chain per rack: add, remove, reorder, bypass, open plugin windows (inline when running in a DAW)
 - **Drag and drop**: drag plugins from the list or the hot strip into the rack at an exact position, drag rack rows to reorder, or drop a `.vst3` / `.component` file on the window
 - **Hot plugins**: star a plugin to pin it, and your most-used plugins appear automatically in a one-click strip under the toolbar and in the **Hot plugins** menu
 - Input and output meters with peak hold and clip lights, master gain, latency reporting to the DAW
 - Search bar, Bypass all, Clear rack, tooltips
 - Save/load racks (`.orack`) including plugin state; the rack is also saved inside your DAW project
-- **64 stereo input buses** (VST3): switch inputs on in your DAW, mix them (gain / mute / solo / meters) from the **Inputs** view. FL Studio can send mixer tracks to any of them; Logic's AU exposes the main input plus its one side-chain
-- **Snapshots**: 8 stored racks per project. Same plugins = instant recall; otherwise plugins reload. They are also the plugin's 8 programs, so a DAW can automate them
+- **64 stereo input and output buses** (VST3): switch them on in your DAW, trim each input from the **Inputs** view, and patch racks to them. FL Studio can send mixer tracks to any input; Logic's AU exposes the main input plus its one side-chain and a single output
+- **Snapshots**: 8 stored sessions (all racks, patching and faders). Same plugins = instant recall; otherwise plugins reload. They are also the plugin's 8 programs, so a DAW can automate them
 - **Crash protection**: new plugins are test-loaded in a separate process first (standalone app), plugins that crash while loading get blocked, and the standalone app offers to restore your last rack after an unexpected exit
 
 ## Build
@@ -29,13 +30,15 @@ Linux also needs the JUCE system dependencies (ALSA, X11, freetype, etc.).
 GitHub Actions builds all three platforms and runs auval / pluginval on the plugin.
 
 ## Using it
-1. Click **Scan plugins** (or drop a plugin file on the window).
-2. Double-click a plugin, press Enter in the search box, or drag it into the rack.
-3. Click the star beside plugins you reach for often to pin them as hot plugins.
-4. Use Edit / Bypass / ^ / v / X on each rack row, or drag the row to reorder.
+1. Standalone: open **Audio settings** and enable your interface's channels. Add racks on the right, then pick each rack's **In** and **Out** pair.
+2. Click **Scan plugins** (or drop a plugin file on the window).
+3. Double-click a plugin, press Enter in the search box, or drag it into the rack.
+4. Click the star beside plugins you reach for often to pin them as hot plugins.
+5. Use Edit / Bypass / ^ / v / X on each rack row, or drag the row to reorder.
 
 ## Roadmap
 - MIDI routing and instrument plugins
+- MIDI / OSC control of snapshots, faders and bypass
 - Parallel chains and per-slot gain
 - Full out-of-process plugin hosting (today's protection covers loading, not a crash while audio is running)
 

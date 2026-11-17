@@ -545,11 +545,11 @@ public:
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
-        g.drawText("INPUT BUSES  -  " + juce::String(kMaxInputBuses) + " stereo inputs mixed into the rack",
+        g.drawText("INPUT BUSES  -  " + juce::String(kMaxInputBuses) + " stereo inputs you can patch to racks",
                    16, 8, getWidth() - 32, 20, juce::Justification::centredLeft);
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText("Inputs your DAW has switched on are lit. FL Studio: send a mixer track to an OpenRack input. "
-                   "Logic Pro: input 2 is the side-chain.",
+        g.drawText("Inputs your DAW has switched on are lit; choose each rack's In / Out pair in the rack header. "
+                   "FL Studio: send a mixer track to an OpenRack input. Logic Pro: input 2 is the side-chain.",
                    16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
     }
 
@@ -585,6 +585,116 @@ public:
     }
 };
 
+// One row in the racks sidebar: number, name, patching summary, mute / solo and a level meter.
+// Clicks on the empty parts fall through to the list, which selects the rack.
+class RackRow : public juce::Component, private juce::Timer
+{
+public:
+    static constexpr int kHeight = 48;
+
+    explicit RackRow(RackEngine& e) : engine(e)
+    {
+        setInterceptsMouseClicks(false, true);
+
+        mute.setButtonText("M");
+        solo.setButtonText("S");
+        mute.setClickingTogglesState(true);
+        solo.setClickingTogglesState(true);
+        mute.setTooltip("Mute this rack");
+        solo.setTooltip("Solo this rack");
+        mute.setColour(juce::TextButton::buttonOnColourId, Theme::warning());
+        solo.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3ddc84));
+        mute.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+        solo.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+        addAndMakeVisible(mute);
+        addAndMakeVisible(solo);
+
+        mute.onClick = [this] { engine.setRackMute(row, mute.getToggleState()); };
+        solo.onClick = [this] { engine.setRackSolo(row, solo.getToggleState()); };
+        startTimerHz(20);
+    }
+
+    static juce::String pairName(int pair)
+    {
+        return pair < 0 ? juce::String("-") : juce::String(pair * 2 + 1) + "-" + juce::String(pair * 2 + 2);
+    }
+
+    void setRow(int r)
+    {
+        row = r;
+        name = engine.getRackName(r);
+        const int n = engine.getRackNumSlots(r);
+        details = "In " + pairName(engine.getRackInputPair(r)) + "  >  Out " + pairName(engine.getRackOutputPair(r))
+                  + "   -   " + juce::String(n) + (n == 1 ? " plugin" : " plugins");
+        mute.setToggleState(engine.isRackMuted(r), juce::dontSendNotification);
+        solo.setToggleState(engine.isRackSoloed(r), juce::dontSendNotification);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(mute.getToggleState() ? Theme::muted() : Theme::tint(name));
+        g.fillRoundedRectangle(8.0f, 10.0f, 4.0f, (float) getHeight() - 20.0f, 2.0f);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        g.drawText(juce::String(row + 1), 14, 0, 24, getHeight() - 8, juce::Justification::centred);
+
+        const int textW = juce::jmax(40, mute.getX() - 44 - 6);
+        g.setColour(mute.getToggleState() ? Theme::muted() : Theme::text());
+        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.drawText(name, 44, 5, textW, 18, juce::Justification::centredLeft, true);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(11.0f));
+        g.drawText(details, 44, 22, textW, 14, juce::Justification::centredLeft, true);
+
+        // level meter along the bottom
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto bar = juce::Rectangle<float>(44.0f, (float) getHeight() - 11.0f + (float) ch * 4.0f,
+                                              (float) textW, 3.0f);
+            g.setColour(Theme::control());
+            g.fillRoundedRectangle(bar, 1.5f);
+
+            const float db = juce::Decibels::gainToDecibels(level[ch], -60.0f);
+            const float frac = juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 66.0f);
+            if (frac > 0.0f)
+            {
+                g.setColour(db > -1.0f ? juce::Colour(0xffff5252) : db > -12.0f ? Theme::warning()
+                                                                                : juce::Colour(0xff3ddc84));
+                g.fillRoundedRectangle(bar.withWidth(juce::jmax(3.0f, bar.getWidth() * frac)), 1.5f);
+            }
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(6, 10);
+        r.removeFromBottom(4);
+        solo.setBounds(r.removeFromRight(26));
+        r.removeFromRight(3);
+        mute.setBounds(r.removeFromRight(26));
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (! isShowing())
+            return;
+
+        for (int ch = 0; ch < 2; ++ch)
+            level[ch] = juce::jmax(engine.takeRackPeak(row, ch), level[ch] * 0.88f);
+        repaint();
+    }
+
+    RackEngine& engine;
+    int row = 0;
+    juce::String name, details;
+    juce::TextButton mute, solo;
+    float level[2] { 0.0f, 0.0f };
+};
+
 //==============================================================================
 class MainComponent : public juce::Component,
                       public juce::DragAndDropContainer,
@@ -598,7 +708,7 @@ public:
     std::function<void(int, int)> onRequestSize;
 
     explicit MainComponent(RackEngine& e)
-        : engine(e), hot(getDataDir().getChildFile("hot.xml")), rackModel(*this), pluginModel(*this)
+        : engine(e), hot(getDataDir().getChildFile("hot.xml")), rackModel(*this), racksModel(*this), pluginModel(*this)
     {
         auto dataDir = getDataDir();
         dataDir.createDirectory();
@@ -622,7 +732,7 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -632,6 +742,10 @@ public:
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
         inputsBtn.setButtonText("Inputs");
+        addRackBtn.setButtonText("Add rack");
+        removeRackBtn.setButtonText("Remove rack");
+        addRackBtn.setTooltip("Add another stereo rack (up to 64)");
+        removeRackBtn.setTooltip("Remove the selected rack");
         inputsBtn.setTooltip("Mix the 64 input buses your DAW can send to OpenRack");
 
         scanBtn.setTooltip("Find the plugins installed on this computer");
@@ -650,6 +764,34 @@ public:
         bypassAllBtn.onClick = [this] { engine.setAllBypassed(! engine.areAllBypassed()); };
         clearBtn.onClick = [this] { confirmClear(); };
         inputsBtn.onClick = [this] { toggleInputs(); };
+        addRackBtn.onClick = [this] { engine.addRack(); };
+        removeRackBtn.onClick = [this] { confirmRemoveRack(); };
+
+        // Racks sidebar and patching
+        racksList.setModel(&racksModel);
+        racksList.setRowHeight(RackRow::kHeight);
+        addAndMakeVisible(racksList);
+
+        for (auto* l : { &inLabel, &outLabel })
+        {
+            l->setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+            l->setColour(juce::Label::textColourId, Theme::muted());
+            addAndMakeVisible(l);
+        }
+        inLabel.setText("IN", juce::dontSendNotification);
+        outLabel.setText("OUT", juce::dontSendNotification);
+        inCombo.setTooltip("Which input pair feeds this rack");
+        outCombo.setTooltip("Which output pair this rack plays to");
+        inCombo.onChange = [this]
+        {
+            engine.setRackInputPair(engine.getSelectedRack(), inCombo.getSelectedId() - 2);
+        };
+        outCombo.onChange = [this]
+        {
+            engine.setRackOutputPair(engine.getSelectedRack(), outCombo.getSelectedId() - 2);
+        };
+        addAndMakeVisible(inCombo);
+        addAndMakeVisible(outCombo);
 
         // Snapshot buttons
         addAndMakeVisible(snapLabel);
@@ -686,13 +828,13 @@ public:
         addAndMakeVisible(pluginList);
         addAndMakeVisible(rackList);
 
-        for (auto* l : { &pluginTitle, &rackTitle, &gainLabel })
+        for (auto* l : { &pluginTitle, &rackTitle, &racksTitle, &gainLabel })
         {
             l->setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
             l->setColour(juce::Label::textColourId, Theme::muted());
             addAndMakeVisible(l);
         }
-        gainLabel.setText("MASTER", juce::dontSendNotification);
+        gainLabel.setText("FADER", juce::dontSendNotification);
 
         gainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         gainSlider.setRange(-60.0, 12.0, 0.1);
@@ -700,7 +842,7 @@ public:
         gainSlider.setDoubleClickReturnValue(true, 0.0);
         gainSlider.setTextValueSuffix(" dB");
         gainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
-        gainSlider.setTooltip("Master volume at the end of the rack (double-click to reset to 0 dB)");
+        gainSlider.setTooltip("Fader of the selected rack (double-click to reset to 0 dB)");
         gainSlider.onValueChange = [this]
         {
             engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
@@ -722,7 +864,7 @@ public:
         editorHost.onWantedSize = [this](int w, int h)
         {
             if (onRequestSize)
-                onRequestSize(juce::jmax(1020, w), juce::jmax(700, h));
+                onRequestSize(juce::jmax(1180, w), juce::jmax(720, h));
         };
         if (! engine.ownsAudioDevice())
             engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
@@ -732,7 +874,7 @@ public:
                 closeInlineEditor(false);
         };
 
-        setSize(1020, 700);
+        setSize(1180, 720);
         rebuildFilter();
         rebuildHotChips();
         refresh();
@@ -805,7 +947,7 @@ public:
         }
 
         // Panels behind the two lists and the master bar
-        for (auto* panel : { &pluginPanel, &rackPanel, &masterBar })
+        for (auto* panel : { &pluginPanel, &rackPanel, &racksPanel, &masterBar })
         {
             auto p = panel->toFloat();
             g.setGradientFill(juce::ColourGradient(Theme::panel().brighter(0.06f), 0.0f, p.getY(),
@@ -831,7 +973,7 @@ public:
         if (engine.getNumSlots() == 0)
             g.drawFittedText("The rack is empty.\nDrag a plugin here, double-click one on the left,\n"
                              "or press Enter in the search box.",
-                             rackPanel.reduced(30), juce::Justification::centred, 4);
+                             rackList.getBounds().reduced(24), juce::Justification::centred, 4);
 
         // Status bar
         const bool hasDevice = ! engine.ownsAudioDevice()
@@ -911,6 +1053,9 @@ public:
         inner.removeFromRight(18);
         gainSlider.setBounds(inner);
 
+        auto racksCol = r.removeFromRight(juce::jlimit(200, 260, r.getWidth() / 4));
+        r.removeFromRight(16);
+
         auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
         r.removeFromLeft(16);
 
@@ -935,7 +1080,24 @@ public:
         }
         r.removeFromTop(8);
         rackPanel = r;
-        rackList.setBounds(r.reduced(6));
+
+        auto inner = r.reduced(10, 8);
+        auto patchRow = inner.removeFromTop(28);
+        inLabel.setBounds(patchRow.removeFromLeft(24));
+        inCombo.setBounds(patchRow.removeFromLeft((patchRow.getWidth() - 40) / 2));
+        patchRow.removeFromLeft(10);
+        outLabel.setBounds(patchRow.removeFromLeft(30));
+        outCombo.setBounds(patchRow);
+        inner.removeFromTop(6);
+        rackList.setBounds(inner);
+
+        racksTitle.setBounds(racksCol.removeFromTop(24));
+        auto rackBtns = racksCol.removeFromTop(32);
+        addRackBtn.setBounds(rackBtns.removeFromLeft(rackBtns.getWidth() / 2).reduced(0, 2).withTrimmedRight(3));
+        removeRackBtn.setBounds(rackBtns.reduced(0, 2).withTrimmedLeft(3));
+        racksCol.removeFromTop(8);
+        racksPanel = racksCol;
+        racksList.setBounds(racksCol.reduced(6));
 
         layoutHotChips();
     }
@@ -1044,6 +1206,46 @@ private:
                 return "move:" + juce::String(rows[0]);
             return {};
         }
+        MainComponent& owner;
+    };
+
+    struct RacksModel : juce::ListBoxModel
+    {
+        explicit RacksModel(MainComponent& o) : owner(o) {}
+        int getNumRows() override { return owner.engine.getNumRacks(); }
+        void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool selected) override
+        {
+            auto r = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
+            g.setColour(selected ? Theme::row().brighter(0.1f) : Theme::row());
+            g.fillRoundedRectangle(r, 8.0f);
+            if (selected)
+            {
+                g.setColour(Theme::accent());
+                g.drawRoundedRectangle(r.reduced(0.5f), 8.0f, 1.5f);
+            }
+        }
+        juce::Component* refreshComponentForRow(int row, bool, juce::Component* existing) override
+        {
+            if (row >= getNumRows())
+            {
+                delete existing;
+                return nullptr;
+            }
+            auto* r = dynamic_cast<RackRow*>(existing);
+            if (r == nullptr)
+            {
+                delete existing;
+                r = new RackRow(owner.engine);
+            }
+            r->setRow(row);
+            return r;
+        }
+        void selectedRowsChanged(int lastRow) override
+        {
+            if (lastRow >= 0)
+                owner.engine.selectRack(lastRow);
+        }
+        void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { owner.renameRack(row); }
         MainComponent& owner;
     };
 
@@ -1586,6 +1788,83 @@ private:
         });
     }
 
+    // Fill the In / Out selectors for the selected rack (only when something changed,
+    // so an open menu is not rebuilt under the user).
+    void updatePatchCombos()
+    {
+        const int sel = engine.getSelectedRack();
+        const int curIn = engine.getRackInputPair(sel);
+        const int curOut = engine.getRackOutputPair(sel);
+        const int nIn = engine.getNumInputPairs();
+        const int nOut = engine.getNumOutputPairs();
+
+        const auto sig = juce::String(sel) + "/" + juce::String(curIn) + "/" + juce::String(curOut)
+                         + "/" + juce::String(nIn) + "/" + juce::String(nOut);
+        if (sig == patchSignature)
+            return;
+        patchSignature = sig;
+
+        auto fill = [](juce::ComboBox& box, int count, int current)
+        {
+            box.clear(juce::dontSendNotification);
+            box.addItem("None", 1);
+            for (int p = 0; p < juce::jmax(count, current + 1); ++p)
+                box.addItem(RackRow::pairName(p), 2 + p);
+            box.setSelectedId(current < 0 ? 1 : 2 + current, juce::dontSendNotification);
+        };
+
+        fill(inCombo, nIn, curIn);
+        fill(outCombo, nOut, curOut);
+    }
+
+    void renameRack(int row)
+    {
+        if (row < 0 || row >= engine.getNumRacks())
+            return;
+
+        auto* w = new juce::AlertWindow("Rename rack", "Name for this rack:",
+                                        juce::MessageBoxIconType::NoIcon, this);
+        w->addTextEditor("name", engine.getRackName(row));
+        w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+        juce::Component::SafePointer<juce::AlertWindow> window(w);
+        juce::Component::SafePointer<MainComponent> safe(this);
+        w->enterModalState(true,
+                           juce::ModalCallbackFunction::create([safe, window, row](int result)
+                           {
+                               if (result == 1 && safe != nullptr && window != nullptr)
+                                   safe->engine.renameRack(row, window->getTextEditorContents("name"));
+                           }),
+                           true);
+    }
+
+    void confirmRemoveRack()
+    {
+        const int sel = engine.getSelectedRack();
+        if (engine.getNumRacks() <= 1)
+            return;
+
+        if (engine.getRackNumSlots(sel) == 0)
+        {
+            engine.removeRack(sel);
+            return;
+        }
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::AlertWindow::showAsync(
+            juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::QuestionIcon, "Remove rack",
+                "Remove \"" + engine.getRackName(sel) + "\" and its " + juce::String(engine.getRackNumSlots(sel))
+                    + " plugins?",
+                "Remove", "Cancel", this),
+            [safe, sel](int result)
+            {
+                if (result == 1 && safe != nullptr)
+                    safe->engine.removeRack(sel);
+            });
+    }
+
     void confirmClear()
     {
         if (engine.getNumSlots() == 0)
@@ -1618,10 +1897,20 @@ private:
 
         const int n = engine.getNumSlots();
         const int lat = engine.getTotalLatency();
-        auto title = "RACK  -  " + juce::String(n) + (n == 1 ? " plugin" : " plugins");
+        const int sel = engine.getSelectedRack();
+        auto title = "RACK " + juce::String(sel + 1) + "  -  " + engine.getRackName(sel).toUpperCase()
+                     + "  -  " + juce::String(n) + (n == 1 ? " plugin" : " plugins");
         if (lat > 0)
             title += "  -  latency " + juce::String(lat) + " smp";
         rackTitle.setText(title, juce::dontSendNotification);
+
+        racksTitle.setText("RACKS  -  " + juce::String(engine.getNumRacks()), juce::dontSendNotification);
+        racksList.updateContent();
+        racksList.selectRow(sel, true, true);
+        racksList.repaint();
+        removeRackBtn.setEnabled(engine.getNumRacks() > 1);
+        addRackBtn.setEnabled(engine.getNumRacks() < kMaxRacks);
+        updatePatchCombos();
 
         for (int i = 0; i < kNumSnapshots; ++i)
         {
@@ -1798,12 +2087,13 @@ private:
     LevelMeter inMeter { engine, true, "IN" };
     LevelMeter meter { engine, false, "OUT" };
     RackModel rackModel;
+    RacksModel racksModel;
     PluginModel pluginModel;
     std::vector<juce::PluginDescription> filtered;
     int totalEffects = 0;
-    juce::ListBox pluginList, rackList;
+    juce::ListBox pluginList, rackList, racksList;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
     InputsPanel inputsPanel { engine };
@@ -1813,8 +2103,10 @@ private:
     juce::File autosaveFile = getDataDir().getChildFile("autosave.orack");
     bool autosaveArmed = false, autosaveDirty = false;
     juce::Slider gainSlider;
-    juce::Label gainLabel, pluginTitle, rackTitle;
-    juce::Rectangle<int> pluginPanel, rackPanel, statusBar, hotStrip, masterBar;
+    juce::Label gainLabel, pluginTitle, rackTitle, racksTitle, inLabel, outLabel;
+    juce::ComboBox inCombo, outCombo;
+    juce::String patchSignature;
+    juce::Rectangle<int> pluginPanel, rackPanel, racksPanel, statusBar, hotStrip, masterBar;
     juce::String statusText;
     std::vector<std::unique_ptr<HotChip>> hotChips;
     juce::String hotSignature;
@@ -1822,7 +2114,7 @@ private:
     bool fileDropActive = false;
     InlineEditorHost editorHost;
     juce::uint32 inlineNode = 0;
-    int preEditorW = 1020, preEditorH = 700;
+    int preEditorW = 1180, preEditorH = 720;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::TooltipWindow tooltipWindow { this, 700 };
