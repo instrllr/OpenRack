@@ -1081,15 +1081,15 @@ public:
         r.removeFromTop(8);
         rackPanel = r;
 
-        auto inner = r.reduced(10, 8);
-        auto patchRow = inner.removeFromTop(28);
+        auto chainArea = r.reduced(10, 8);
+        auto patchRow = chainArea.removeFromTop(28);
         inLabel.setBounds(patchRow.removeFromLeft(24));
         inCombo.setBounds(patchRow.removeFromLeft((patchRow.getWidth() - 40) / 2));
         patchRow.removeFromLeft(10);
         outLabel.setBounds(patchRow.removeFromLeft(30));
         outCombo.setBounds(patchRow);
-        inner.removeFromTop(6);
-        rackList.setBounds(inner);
+        chainArea.removeFromTop(6);
+        rackList.setBounds(chainArea);
 
         racksTitle.setBounds(racksCol.removeFromTop(24));
         auto rackBtns = racksCol.removeFromTop(32);
