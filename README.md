@@ -13,6 +13,9 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 - Input and output meters with peak hold and clip lights, master gain, latency reporting to the DAW
 - Search bar, Bypass all, Clear rack, tooltips
 - Save/load racks (`.orack`) including plugin state; the rack is also saved inside your DAW project
+- **64 stereo input buses** (VST3): switch inputs on in your DAW, mix them (gain / mute / solo / meters) from the **Inputs** view. FL Studio can send mixer tracks to any of them; Logic's AU exposes the main input plus its one side-chain
+- **Snapshots**: 8 stored racks per project. Same plugins = instant recall; otherwise plugins reload. They are also the plugin's 8 programs, so a DAW can automate them
+- **Crash protection**: new plugins are test-loaded in a separate process first (standalone app), plugins that crash while loading get blocked, and the standalone app offers to restore your last rack after an unexpected exit
 
 ## Build
 Requires CMake 3.22+ and a C++17 compiler. JUCE is fetched automatically.
@@ -32,10 +35,9 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 4. Use Edit / Bypass / ^ / v / X on each rack row, or drag the row to reorder.
 
 ## Roadmap
-- Snapshots with instant switching
 - MIDI routing and instrument plugins
 - Parallel chains and per-slot gain
-- Plugin sandboxing
+- Full out-of-process plugin hosting (today's protection covers loading, not a crash while audio is running)
 
 # DISCLAIMER
 
