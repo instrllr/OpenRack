@@ -10,6 +10,7 @@ FetchContent_MakeAvailable(JUCE)
 
 juce_add_gui_app(OpenRack
     PRODUCT_NAME "OpenRack"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/OpenRackIcon.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenRack needs audio input to process your signal.")
 
@@ -44,6 +45,7 @@ endif()
 
 juce_add_plugin(OpenRackPlugin
     PRODUCT_NAME "OpenRack"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/OpenRackIcon.png"
     COMPANY_NAME "OpenRack"
     BUNDLE_ID "com.openrack.OpenRack"
     PLUGIN_MANUFACTURER_CODE Orck
