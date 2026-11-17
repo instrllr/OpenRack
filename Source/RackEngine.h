@@ -216,6 +216,19 @@ public:
 
             graph.processBlock(work, midi);
 
+            // Master: one gain for every output, with its own meter (even channels = left, odd = right).
+            const float mg = masterGain.load(std::memory_order_relaxed);
+            float peakL = 0.0f, peakR = 0.0f;
+            for (int ch = 0; ch < kGraphChannels; ++ch)
+            {
+                if (mg != 1.0f)
+                    work.applyGain(ch, 0, c, mg);
+                const float m = work.getMagnitude(ch, 0, c);
+                (ch & 1 ? peakR : peakL) = juce::jmax(ch & 1 ? peakR : peakL, m);
+            }
+            raisePeak(masterPeakL, peakL);
+            raisePeak(masterPeakR, peakR);
+
             for (int ch = 0; ch < numOut; ++ch)
                 if (out[ch] != nullptr)
                 {
@@ -410,8 +423,17 @@ public:
 
     //--------------------------------------------------------------------------
     // The selected rack: its fader and meters
-    float getMasterGain() const { return getRackGain(selected); }
-    void setMasterGain(float g) { setRackGain(selected, g); }
+    float getFaderGain() const { return getRackGain(selected); }
+    void setFaderGain(float g) { setRackGain(selected, g); }
+
+    // The master: one fader over every output, with its own meter.
+    float getMasterGain() const { return masterGain.load(); }
+    void setMasterGain(float g) { masterGain.store(g); }
+
+    float takeMasterPeak(int channel)
+    {
+        return (channel == 0 ? masterPeakL : masterPeakR).exchange(0.0f);
+    }
 
     float takeOutputPeak(int channel)
     {
@@ -618,6 +640,7 @@ public:
                 }
             }
             applyInputsXml(*xml);
+            masterGain.store((float) xml->getDoubleAttribute("master", 1.0));
             applyMuteSolo();
             rebuildConnections();
             notify();
@@ -643,6 +666,7 @@ public:
     {
         auto root = std::make_unique<juce::XmlElement>("Session");
         root->setAttribute("sel", selected);
+        root->setAttribute("master", (double) masterGain.load());
 
         for (auto& r : racks)
         {
@@ -966,6 +990,7 @@ private:
 
         selected = juce::jlimit(0, getNumRacks() - 1, session->getIntAttribute("sel", 0));
         applyInputsXml(*session);
+        masterGain.store((float) session->getDoubleAttribute("master", 1.0));
         applyMuteSolo();
         rebuildConnections();
         notify();
@@ -1100,6 +1125,7 @@ private:
     double sampleRate = 44100.0;
     int blockSize = 512;
     int cap_ = 512;
+    std::atomic<float> masterGain { 1.0f }, masterPeakL { 0.0f }, masterPeakR { 0.0f };
     std::atomic<int> numInputPairs { kMaxInputBuses }, numOutputPairs { kMaxInputBuses };
     std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
 

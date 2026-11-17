@@ -15,17 +15,17 @@ static int measureText(const juce::String& text, float height, bool bold = false
 }
 
 //==============================================================================
-// Stereo level meter (input or output) with dB ticks, peak hold and a clip light.
+// Vertical stereo level meter with dB ticks, peak hold and a clip light on top.
+// `source(ch)` returns the peak since it was last asked (0 = left, 1 = right).
 class LevelMeter : public juce::Component,
                    public juce::SettableTooltipClient,
                    private juce::Timer
 {
 public:
-    LevelMeter(RackEngine& e, bool input, juce::String labelText)
-        : engine(e), isInput(input), label(std::move(labelText))
+    LevelMeter(std::function<float(int)> peakSource, juce::String labelText, juce::String tip)
+        : source(std::move(peakSource)), label(std::move(labelText))
     {
-        setTooltip(isInput ? "Level arriving at the rack. Click to reset the clip light."
-                           : "Level leaving the rack. Click to reset the clip light.");
+        setTooltip(tip + " Click to reset the clip light.");
         startTimerHz(30);
     }
 
@@ -36,42 +36,42 @@ public:
         auto area = getLocalBounds().toFloat();
 
         g.setColour(Theme::muted());
-        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
-        g.drawText(label, area.removeFromLeft(30.0f), juce::Justification::centredLeft);
-
-        auto led = area.removeFromRight(12.0f);
-        area.removeFromRight(6.0f);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText(label, area.removeFromBottom(20.0f), juce::Justification::centred);
 
         // Clip light
+        auto led = area.removeFromTop(8.0f);
         g.setColour(clipped ? juce::Colour(0xffff5252) : Theme::control());
-        g.fillRoundedRectangle(led.withSizeKeepingCentre(10.0f, juce::jmin(led.getHeight(), 22.0f)), 3.0f);
+        g.fillRoundedRectangle(led.reduced(1.0f, 0.0f), 3.0f);
+        area.removeFromTop(3.0f);
 
         const float gap = 3.0f;
-        const float barH = (area.getHeight() - gap) / 2.0f;
+        const float barW = (area.getWidth() - gap) / 2.0f;
 
         for (int ch = 0; ch < 2; ++ch)
         {
-            auto bar = juce::Rectangle<float>(area.getX(), area.getY() + (float) ch * (barH + gap),
-                                              area.getWidth(), barH);
+            auto bar = juce::Rectangle<float>(area.getX() + (float) ch * (barW + gap), area.getY(),
+                                              barW, area.getHeight());
             g.setColour(Theme::control());
-            g.fillRoundedRectangle(bar, barH * 0.5f);
+            g.fillRoundedRectangle(bar, barW * 0.5f);
 
             const float frac = toFraction(level[ch]);
             if (frac > 0.0f)
             {
-                juce::ColourGradient grad(juce::Colour(0xff3ddc84), bar.getX(), 0.0f,
-                                          juce::Colour(0xffff5252), bar.getRight(), 0.0f, false);
-                grad.addColour(0.7, Theme::warning());
+                juce::ColourGradient grad(juce::Colour(0xffff5252), 0.0f, bar.getY(),
+                                          juce::Colour(0xff3ddc84), 0.0f, bar.getBottom(), false);
+                grad.addColour(0.22, Theme::warning());
+                grad.addColour(0.40, juce::Colour(0xff3ddc84));
                 g.setGradientFill(grad);
-                g.fillRoundedRectangle(bar.withWidth(juce::jmax(barH, bar.getWidth() * frac)), barH * 0.5f);
+                const float h = juce::jmax(barW, bar.getHeight() * frac);
+                g.fillRoundedRectangle(bar.withTop(bar.getBottom() - h), barW * 0.5f);
             }
 
-            // Peak hold marker
-            const float hx = bar.getX() + bar.getWidth() * toFraction(hold[ch]);
             if (hold[ch] > 0.001f)
             {
                 g.setColour(Theme::text().withAlpha(0.85f));
-                g.fillRect(juce::Rectangle<float>(hx - 1.0f, bar.getY(), 2.0f, barH));
+                g.fillRect(juce::Rectangle<float>(bar.getX(), bar.getBottom() - bar.getHeight() * toFraction(hold[ch]) - 1.0f,
+                                                  barW, 2.0f));
             }
         }
 
@@ -79,8 +79,8 @@ public:
         g.setColour(juce::Colours::white.withAlpha(0.14f));
         for (float db : { -48.0f, -36.0f, -24.0f, -12.0f, -6.0f, 0.0f })
         {
-            const float x = area.getX() + area.getWidth() * dbToFraction(db);
-            g.fillRect(juce::Rectangle<float>(x, area.getY(), 1.0f, area.getHeight()));
+            const float y = area.getBottom() - area.getHeight() * dbToFraction(db);
+            g.fillRect(juce::Rectangle<float>(area.getX(), y, area.getWidth(), 1.0f));
         }
     }
 
@@ -90,9 +90,12 @@ private:
 
     void timerCallback() override
     {
+        if (! isShowing())
+            return;
+
         for (int ch = 0; ch < 2; ++ch)
         {
-            const float raw = isInput ? engine.takeInputPeak(ch) : engine.takeOutputPeak(ch);
+            const float raw = source(ch);
             if (raw >= 1.0f) clipped = true;
 
             level[ch] = juce::jmax(raw, level[ch] * 0.90f);
@@ -104,8 +107,7 @@ private:
         repaint();
     }
 
-    RackEngine& engine;
-    const bool isInput;
+    std::function<float(int)> source;
     juce::String label;
     float level[2] { 0.0f, 0.0f };
     float hold[2] { 0.0f, 0.0f };
@@ -828,30 +830,48 @@ public:
         addAndMakeVisible(pluginList);
         addAndMakeVisible(rackList);
 
-        for (auto* l : { &pluginTitle, &rackTitle, &racksTitle, &gainLabel })
+        for (auto* l : { &pluginTitle, &rackTitle, &racksTitle })
         {
             l->setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
             l->setColour(juce::Label::textColourId, Theme::muted());
             addAndMakeVisible(l);
         }
-        gainLabel.setText("FADER", juce::dontSendNotification);
-
-        gainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        gainSlider.setRange(-60.0, 12.0, 0.1);
-        gainSlider.setValue(0.0, juce::dontSendNotification);
-        gainSlider.setDoubleClickReturnValue(true, 0.0);
-        gainSlider.setTextValueSuffix(" dB");
-        gainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
-        gainSlider.setTooltip("Fader of the selected rack (double-click to reset to 0 dB)");
-        gainSlider.onValueChange = [this]
+        for (auto* l : { &rackStripLabel, &masterLabel })
         {
-            engine.setMasterGain(juce::Decibels::decibelsToGain((float) gainSlider.getValue(), -60.0f));
+            l->setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+            l->setColour(juce::Label::textColourId, Theme::muted());
+            l->setJustificationType(juce::Justification::centred);
+            addAndMakeVisible(l);
+        }
+        masterLabel.setText("MASTER", juce::dontSendNotification);
+
+        auto setupFader = [this](juce::Slider& f, const juce::String& tip)
+        {
+            f.setSliderStyle(juce::Slider::LinearVertical);
+            f.setRange(-60.0, 12.0, 0.1);
+            f.setValue(0.0, juce::dontSendNotification);
+            f.setDoubleClickReturnValue(true, 0.0);
+            f.setTextValueSuffix(" dB");
+            f.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 70, 20);
+            f.setTooltip(tip);
+            addAndMakeVisible(f);
         };
-        gainSlider.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
-                            juce::dontSendNotification);
-        addAndMakeVisible(gainSlider);
+        setupFader(rackFader, "Fader of the selected rack (double-click to reset to 0 dB)");
+        setupFader(masterFader, "Master fader for every output (double-click to reset to 0 dB)");
+
+        rackFader.onValueChange = [this]
+        {
+            engine.setFaderGain(juce::Decibels::decibelsToGain((float) rackFader.getValue(), -60.0f));
+        };
+        masterFader.onValueChange = [this]
+        {
+            engine.setMasterGain(juce::Decibels::decibelsToGain((float) masterFader.getValue(), -60.0f));
+        };
+        syncFaders();
+
         addAndMakeVisible(inMeter);
         addAndMakeVisible(meter);
+        addAndMakeVisible(masterMeter);
 
         // As a plugin the DAW owns the audio device, so there is nothing to configure.
         audioBtn.setVisible(engine.ownsAudioDevice());
@@ -947,7 +967,7 @@ public:
         }
 
         // Panels behind the two lists and the master bar
-        for (auto* panel : { &pluginPanel, &rackPanel, &racksPanel, &masterBar })
+        for (auto* panel : { &pluginPanel, &rackPanel, &racksPanel, &mixerPanel })
         {
             auto p = panel->toFloat();
             g.setGradientFill(juce::ColourGradient(Theme::panel().brighter(0.06f), 0.0f, p.getY(),
@@ -956,6 +976,11 @@ public:
             g.setColour(Theme::outline());
             g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
         }
+
+        // Divider between the rack strip and the master strip
+        g.setColour(Theme::outline());
+        g.fillRect(juce::Rectangle<float>((float) stripDividerX, (float) mixerPanel.getY() + 14.0f, 1.0f,
+                                          (float) mixerPanel.getHeight() - 28.0f));
 
         // Empty-state hints
         g.setColour(Theme::muted());
@@ -1041,17 +1066,8 @@ public:
         statusBar = r.removeFromBottom(20);
         r.removeFromBottom(8);
 
-        masterBar = r.removeFromBottom(54);
-        r.removeFromBottom(12);
         inputsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
                               r.getBottom() - hotStrip.getY());
-        auto inner = masterBar.reduced(14, 7);
-        gainLabel.setBounds(inner.removeFromLeft(64));
-        meter.setBounds(inner.removeFromRight(230));
-        inner.removeFromRight(14);
-        inMeter.setBounds(inner.removeFromRight(200));
-        inner.removeFromRight(18);
-        gainSlider.setBounds(inner);
 
         auto racksCol = r.removeFromRight(juce::jlimit(200, 260, r.getWidth() / 4));
         r.removeFromRight(16);
@@ -1096,8 +1112,31 @@ public:
         addRackBtn.setBounds(rackBtns.removeFromLeft(rackBtns.getWidth() / 2).reduced(0, 2).withTrimmedRight(3));
         removeRackBtn.setBounds(rackBtns.reduced(0, 2).withTrimmedLeft(3));
         racksCol.removeFromTop(8);
+
+        // Mixer strips (vertical faders and meters) under the racks list
+        mixerPanel = racksCol.removeFromBottom(juce::jmin(260, racksCol.getHeight() / 2));
+        racksCol.removeFromBottom(12);
         racksPanel = racksCol;
         racksList.setBounds(racksCol.reduced(6));
+
+        auto strips = mixerPanel.reduced(10, 8);
+        auto rackStrip = strips.removeFromLeft(strips.getWidth() * 58 / 100);
+        strips.removeFromLeft(10);
+        auto masterStrip = strips;
+        stripDividerX = masterStrip.getX() - 5;
+
+        rackStripLabel.setBounds(rackStrip.removeFromTop(18));
+        masterLabel.setBounds(masterStrip.removeFromTop(18));
+        rackStrip.removeFromTop(4);
+        masterStrip.removeFromTop(4);
+
+        const int meterW = 26;
+        inMeter.setBounds(rackStrip.removeFromLeft(meterW));
+        meter.setBounds(rackStrip.removeFromRight(meterW));
+        rackFader.setBounds(rackStrip.reduced(4, 0));
+
+        masterMeter.setBounds(masterStrip.removeFromRight(meterW));
+        masterFader.setBounds(masterStrip.reduced(4, 0));
 
         layoutHotChips();
     }
@@ -1788,6 +1827,12 @@ private:
         });
     }
 
+    void syncFaders()
+    {
+        rackFader.setValue(juce::Decibels::gainToDecibels(engine.getFaderGain(), -60.0f), juce::dontSendNotification);
+        masterFader.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f), juce::dontSendNotification);
+    }
+
     // Fill the In / Out selectors for the selected rack (only when something changed,
     // so an open menu is not rebuilt under the user).
     void updatePatchCombos()
@@ -1886,9 +1931,8 @@ private:
     //--------------------------------------------------------------------------
     void refresh()
     {
-        // Keep the master slider in step with a rack loaded by the host or from a file.
-        gainSlider.setValue(juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
-                            juce::dontSendNotification);
+        // Keep the faders in step with a rack loaded by the host or from a file.
+        syncFaders();
         rebuildFilter();
         rackList.updateContent();
         rackList.repaint();
@@ -1904,6 +1948,8 @@ private:
             title += "  -  latency " + juce::String(lat) + " smp";
         rackTitle.setText(title, juce::dontSendNotification);
 
+        rackStripLabel.setText("RACK " + juce::String(sel + 1), juce::dontSendNotification);
+        rackStripLabel.setTooltip(engine.getRackName(sel));
         racksTitle.setText("RACKS  -  " + juce::String(engine.getNumRacks()), juce::dontSendNotification);
         racksList.updateContent();
         racksList.selectRow(sel, true, true);
@@ -2071,9 +2117,7 @@ private:
                                  if (f == juce::File()) return;
                                  engine.loadRack(f, [this](const juce::String& err)
                                  {
-                                     gainSlider.setValue(
-                                         juce::Decibels::gainToDecibels(engine.getMasterGain(), -60.0f),
-                                         juce::dontSendNotification);
+                                     syncFaders();
                                      if (err.isNotEmpty())
                                          juce::AlertWindow::showMessageBoxAsync(
                                              juce::MessageBoxIconType::WarningIcon, "Load rack", err);
@@ -2084,8 +2128,12 @@ private:
     //--------------------------------------------------------------------------
     RackEngine& engine;
     HotPlugins hot;
-    LevelMeter inMeter { engine, true, "IN" };
-    LevelMeter meter { engine, false, "OUT" };
+    LevelMeter inMeter { [this](int ch) { return engine.takeInputPeak(ch); }, "IN",
+                         "Level arriving at the selected rack." };
+    LevelMeter meter { [this](int ch) { return engine.takeOutputPeak(ch); }, "OUT",
+                       "Level leaving the selected rack (after its fader)." };
+    LevelMeter masterMeter { [this](int ch) { return engine.takeMasterPeak(ch); }, "OUT",
+                             "Level of all outputs after the master fader." };
     RackModel rackModel;
     RacksModel racksModel;
     PluginModel pluginModel;
@@ -2102,11 +2150,12 @@ private:
     juce::File lockFile = getDataDir().getChildFile("session.lock");
     juce::File autosaveFile = getDataDir().getChildFile("autosave.orack");
     bool autosaveArmed = false, autosaveDirty = false;
-    juce::Slider gainSlider;
-    juce::Label gainLabel, pluginTitle, rackTitle, racksTitle, inLabel, outLabel;
+    juce::Slider rackFader, masterFader;
+    int stripDividerX = 0;
+    juce::Label rackStripLabel, masterLabel, pluginTitle, rackTitle, racksTitle, inLabel, outLabel;
     juce::ComboBox inCombo, outCombo;
     juce::String patchSignature;
-    juce::Rectangle<int> pluginPanel, rackPanel, racksPanel, statusBar, hotStrip, masterBar;
+    juce::Rectangle<int> pluginPanel, rackPanel, racksPanel, mixerPanel, statusBar, hotStrip;
     juce::String statusText;
     std::vector<std::unique_ptr<HotChip>> hotChips;
     juce::String hotSignature;
