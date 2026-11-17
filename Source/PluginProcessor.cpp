@@ -154,7 +154,7 @@ OpenRackEditor::OpenRackEditor(OpenRackProcessor& p) : AudioProcessorEditor(&p)
     content->onRequestSize = [this](int w, int h) { setSize(w, h); };
 
     setResizable(true, true);
-    setResizeLimits(960, 540, 4000, 3000);
+    setResizeLimits(1100, 600, 4000, 3000);
     setSize(1180, 720);
 }
 

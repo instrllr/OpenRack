@@ -698,6 +698,358 @@ private:
 };
 
 //==============================================================================
+// The channel-strip EQ of the selected rack: a response curve with draggable
+// bands (drag = frequency and gain, scroll wheel = Q, double-click = reset a
+// band) and exact values underneath.
+class EqPanel : public juce::Component
+{
+public:
+    explicit EqPanel(RackEngine& e) : engine(e)
+    {
+        onBtn.setButtonText("EQ on");
+        onBtn.setClickingTogglesState(true);
+        onBtn.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+        onBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        onBtn.setTooltip("Switch the whole channel EQ on or off");
+        onBtn.onClick = [this]
+        {
+            if (auto* q = eq())
+            {
+                q->enabled = onBtn.getToggleState();
+                q->touch();
+                engine.markDirty();
+                repaint();
+            }
+        };
+        addAndMakeVisible(onBtn);
+
+        resetBtn.setButtonText("Reset");
+        resetBtn.setTooltip("Put every band back to flat");
+        resetBtn.onClick = [this]
+        {
+            if (auto* q = eq())
+            {
+                q->setDefaults();
+                engine.markDirty();
+                syncAll();
+            }
+        };
+        addAndMakeVisible(resetBtn);
+
+        for (int b = 0; b < ChannelEq::kBands; ++b)
+        {
+            on[b].setButtonText("On");
+            on[b].setClickingTogglesState(true);
+            on[b].setColour(juce::TextButton::buttonOnColourId, bandColour(b));
+            on[b].setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+            on[b].onClick = [this, b] { applyFromControls(b); };
+            addAndMakeVisible(on[b]);
+
+            name[b].setText(ChannelEq::bandName(b), juce::dontSendNotification);
+            name[b].setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
+            name[b].setColour(juce::Label::textColourId, bandColour(b));
+            addAndMakeVisible(name[b]);
+
+            freq[b].setSliderStyle(juce::Slider::LinearBar);
+            freq[b].setRange(20.0, 20000.0, 0.1);
+            freq[b].setSkewFactorFromMidPoint(1000.0);
+            freq[b].setTextValueSuffix(" Hz");
+            freq[b].setTooltip("Frequency");
+
+            gain[b].setSliderStyle(juce::Slider::LinearBar);
+            gain[b].setRange(-18.0, 18.0, 0.1);
+            gain[b].setDoubleClickReturnValue(true, 0.0);
+            gain[b].setTextValueSuffix(" dB");
+            gain[b].setTooltip("Gain (double-click for 0 dB)");
+
+            q[b].setSliderStyle(juce::Slider::LinearBar);
+            q[b].setRange(0.2, 10.0, 0.01);
+            q[b].setSkewFactorFromMidPoint(1.0);
+            q[b].setTextValueSuffix(" Q");
+            q[b].setTooltip("Width: higher Q is narrower");
+
+            for (auto* sl : { &freq[b], &gain[b], &q[b] })
+            {
+                sl->onValueChange = [this, b] { applyFromControls(b); };
+                addAndMakeVisible(sl);
+            }
+        }
+        gain[0].setVisible(false);      // the high-pass has no gain
+    }
+
+    // Show the EQ of this rack.
+    void attach(int rackIndex)
+    {
+        rack = rackIndex;
+        syncAll();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto p = getLocalBounds().toFloat();
+        g.setColour(Theme::panel());
+        g.fillRoundedRectangle(p, 10.0f);
+        g.setColour(Theme::outline());
+        g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+        g.drawText("CHANNEL EQ  -  RACK " + juce::String(rack + 1) + "  " + engine.getRackName(rack).toUpperCase(),
+                   100, 12, getWidth() - 190, 28, juce::Justification::centredLeft, true);
+
+        // Graph background and grid
+        g.setColour(Theme::background().darker(0.3f));
+        g.fillRoundedRectangle(graph, 8.0f);
+
+        g.setFont(juce::FontOptions(10.5f));
+        for (float f : { 30.0f, 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 90.0f, 100.0f, 200.0f, 300.0f, 400.0f, 500.0f, 600.0f,
+                         700.0f, 800.0f, 900.0f, 1000.0f, 2000.0f, 3000.0f, 4000.0f, 5000.0f, 6000.0f, 7000.0f,
+                         8000.0f, 9000.0f, 10000.0f })
+        {
+            const bool major = (f == 100.0f || f == 1000.0f || f == 10000.0f);
+            g.setColour(juce::Colours::white.withAlpha(major ? 0.14f : 0.05f));
+            g.fillRect(juce::Rectangle<float>(freqToX(f), graph.getY(), 1.0f, graph.getHeight()));
+            if (major)
+            {
+                g.setColour(Theme::muted());
+                g.drawText(f >= 1000.0f ? juce::String((int) (f / 1000.0f)) + "k" : juce::String((int) f),
+                           (int) freqToX(f) + 3, (int) graph.getBottom() - 15, 30, 13, juce::Justification::left);
+            }
+        }
+        for (float db : { -12.0f, -6.0f, 0.0f, 6.0f, 12.0f })
+        {
+            g.setColour(juce::Colours::white.withAlpha(db == 0.0f ? 0.22f : 0.07f));
+            g.fillRect(juce::Rectangle<float>(graph.getX(), dbToY(db), graph.getWidth(), 1.0f));
+            g.setColour(Theme::muted());
+            g.drawText(juce::String((int) db), (int) graph.getX() + 4, (int) dbToY(db) - 12, 28, 12,
+                       juce::Justification::left);
+        }
+
+        auto* q0 = eq();
+        if (q0 == nullptr)
+            return;
+
+        // Combined response
+        juce::Path curve;
+        for (float x = 0.0f; x <= graph.getWidth(); x += 2.0f)
+        {
+            const double db = juce::jlimit(-18.0, 18.0, q0->totalResponseDb(xToFreq(graph.getX() + x)));
+            const float y = dbToY((float) db);
+            if (x == 0.0f) curve.startNewSubPath(graph.getX() + x, y);
+            else           curve.lineTo(graph.getX() + x, y);
+        }
+
+        const bool enabled = q0->enabled.load();
+        juce::Path fill(curve);
+        fill.lineTo(graph.getRight(), dbToY(0.0f));
+        fill.lineTo(graph.getX(), dbToY(0.0f));
+        fill.closeSubPath();
+        g.setColour(Theme::accent().withAlpha(enabled ? 0.16f : 0.05f));
+        g.fillPath(fill);
+        g.setColour(enabled ? Theme::accent() : Theme::muted());
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
+
+        // Band handles
+        for (int b = 0; b < ChannelEq::kBands; ++b)
+        {
+            const auto pt = handlePos(b);
+            const bool bandOn = q0->bands[b].on.load();
+            g.setColour(bandColour(b).withAlpha(bandOn ? 1.0f : 0.35f));
+            g.fillEllipse(pt.x - 7.0f, pt.y - 7.0f, 14.0f, 14.0f);
+            if (b == selected)
+            {
+                g.setColour(juce::Colours::white);
+                g.drawEllipse(pt.x - 9.0f, pt.y - 9.0f, 18.0f, 18.0f, 1.5f);
+            }
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(12);
+        auto top = r.removeFromTop(28);
+        onBtn.setBounds(top.removeFromLeft(80));
+        resetBtn.setBounds(top.removeFromRight(70));
+        r.removeFromTop(8);
+
+        const int rowsH = juce::jlimit(120, 190, r.getHeight() / 2);
+        graph = r.removeFromTop(juce::jmax(110, r.getHeight() - rowsH - 8)).toFloat();
+        r.removeFromTop(8);
+
+        const int rowH = juce::jlimit(24, 36, r.getHeight() / ChannelEq::kBands);
+        for (int b = 0; b < ChannelEq::kBands; ++b)
+        {
+            auto row = r.removeFromTop(rowH).reduced(0, 2);
+            on[b].setBounds(row.removeFromLeft(42));
+            row.removeFromLeft(6);
+            name[b].setBounds(row.removeFromLeft(52));
+            const int w = row.getWidth();
+            freq[b].setBounds(row.removeFromLeft(w * 40 / 100));
+            row.removeFromLeft(6);
+            if (b == 0)
+            {
+                q[b].setBounds(row.removeFromRight(juce::jmin(row.getWidth(), w * 28 / 100)));
+            }
+            else
+            {
+                gain[b].setBounds(row.removeFromLeft(w * 29 / 100));
+                row.removeFromLeft(6);
+                q[b].setBounds(row);
+            }
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        dragging = -1;
+        if (! graph.contains(e.position))
+            return;
+
+        const int b = nearestBand(e.position);
+        selected = b;
+        dragging = b;
+
+        if (b >= 0)
+            if (auto* q0 = eq())
+                if (! q0->bands[b].on.load())
+                {
+                    q0->bands[b].on = true;
+                    q0->touch();
+                    engine.markDirty();
+                    syncAll();
+                }
+        repaint();
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        auto* q0 = eq();
+        if (dragging < 0 || q0 == nullptr)
+            return;
+
+        const float x = juce::jlimit(graph.getX(), graph.getRight(), e.position.x);
+        const float y = juce::jlimit(graph.getY(), graph.getBottom(), e.position.y);
+        const auto& band = q0->bands[dragging];
+
+        q0->setBand(dragging, xToFreq(x), dragging == 0 ? 0.0f : yToDb(y), band.q.load(), true);
+        engine.markDirty();
+        syncAll();
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent&) override { dragging = -1; }
+
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        auto* q0 = eq();
+        const int b = nearestBand(e.position);
+        if (q0 == nullptr || b < 0)
+            return;
+
+        const auto& band = q0->bands[b];
+        q0->setBand(b, band.freq.load(), 0.0f, band.q.load(), band.on.load());
+        engine.markDirty();
+        syncAll();
+        repaint();
+    }
+
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
+    {
+        auto* q0 = eq();
+        int b = nearestBand(e.position);
+        if (b < 0) b = selected;
+        if (q0 == nullptr || b < 0)
+            return;
+
+        selected = b;
+        const auto& band = q0->bands[b];
+        q0->setBand(b, band.freq.load(), band.gain.load(), band.q.load() * std::exp(wheel.deltaY * 0.8f),
+                    band.on.load());
+        engine.markDirty();
+        syncAll();
+        repaint();
+    }
+
+private:
+    static juce::Colour bandColour(int b)
+    {
+        return juce::Colour::fromHSV(0.08f + 0.19f * (float) b, 0.62f, 0.95f, 1.0f);
+    }
+
+    ChannelEq* eq() { return engine.getEq(rack); }
+
+    float freqToX(float f) const
+    {
+        return graph.getX() + graph.getWidth() * std::log(f / 20.0f) / std::log(1000.0f);
+    }
+    float xToFreq(float x) const
+    {
+        return 20.0f * std::pow(1000.0f, juce::jlimit(0.0f, 1.0f, (x - graph.getX()) / graph.getWidth()));
+    }
+    float dbToY(float db) const { return graph.getCentreY() - db / 18.0f * (graph.getHeight() * 0.5f); }
+    float yToDb(float y) const { return (graph.getCentreY() - y) / (graph.getHeight() * 0.5f) * 18.0f; }
+
+    juce::Point<float> handlePos(int b)
+    {
+        auto* q0 = eq();
+        const float f = q0->bands[b].freq.load();
+        const float gdb = b == 0 ? 0.0f : q0->bands[b].gain.load();
+        return { freqToX(f), dbToY(gdb) };
+    }
+
+    int nearestBand(juce::Point<float> pos)
+    {
+        if (eq() == nullptr)
+            return -1;
+
+        int best = -1;
+        float bestDist = 16.0f;
+        for (int b = 0; b < ChannelEq::kBands; ++b)
+        {
+            const float d = handlePos(b).getDistanceFrom(pos);
+            if (d < bestDist) { bestDist = d; best = b; }
+        }
+        return best;
+    }
+
+    void applyFromControls(int b)
+    {
+        if (auto* q0 = eq())
+        {
+            q0->setBand(b, (float) freq[b].getValue(), b == 0 ? 0.0f : (float) gain[b].getValue(),
+                        (float) q[b].getValue(), on[b].getToggleState());
+            engine.markDirty();
+            repaint();
+        }
+    }
+
+    void syncAll()
+    {
+        if (auto* q0 = eq())
+        {
+            onBtn.setToggleState(q0->enabled.load(), juce::dontSendNotification);
+            for (int b = 0; b < ChannelEq::kBands; ++b)
+            {
+                on[b].setToggleState(q0->bands[b].on.load(), juce::dontSendNotification);
+                freq[b].setValue(q0->bands[b].freq.load(), juce::dontSendNotification);
+                gain[b].setValue(q0->bands[b].gain.load(), juce::dontSendNotification);
+                q[b].setValue(q0->bands[b].q.load(), juce::dontSendNotification);
+            }
+        }
+        repaint();
+    }
+
+    RackEngine& engine;
+    int rack = 0;
+    int selected = -1, dragging = -1;
+    juce::Rectangle<float> graph;
+    juce::TextButton onBtn, resetBtn;
+    juce::TextButton on[ChannelEq::kBands];
+    juce::Label name[ChannelEq::kBands];
+    juce::Slider freq[ChannelEq::kBands], gain[ChannelEq::kBands], q[ChannelEq::kBands];
+};
+
+//==============================================================================
 class MainComponent : public juce::Component,
                       public juce::DragAndDropContainer,
                       public juce::DragAndDropTarget,
@@ -734,7 +1086,7 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -744,6 +1096,8 @@ public:
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
         inputsBtn.setButtonText("Inputs");
+        eqBtn.setButtonText("EQ");
+        eqBtn.setTooltip("Open the built-in channel EQ of the selected rack");
         addRackBtn.setButtonText("Add rack");
         removeRackBtn.setButtonText("Remove rack");
         addRackBtn.setTooltip("Add another stereo rack (up to 64)");
@@ -766,6 +1120,8 @@ public:
         bypassAllBtn.onClick = [this] { engine.setAllBypassed(! engine.areAllBypassed()); };
         clearBtn.onClick = [this] { confirmClear(); };
         inputsBtn.onClick = [this] { toggleInputs(); };
+        eqBtn.onClick = [this] { toggleEq(); };
+        engine.onDirty = [this] { autosaveDirty = true; };
         addRackBtn.onClick = [this] { engine.addRack(); };
         removeRackBtn.onClick = [this] { confirmRemoveRack(); };
 
@@ -876,6 +1232,7 @@ public:
         // As a plugin the DAW owns the audio device, so there is nothing to configure.
         audioBtn.setVisible(engine.ownsAudioDevice());
         inputsBtn.setVisible(! engine.ownsAudioDevice());
+        addChildComponent(eqPanel);
         addChildComponent(inputsPanel);
 
         // Inline plugin editors (used when running inside a DAW).
@@ -908,6 +1265,7 @@ public:
         stopTimer();
         if (engine.ownsAudioDevice())
             lockFile.deleteFile();      // a clean exit: nothing to recover next time
+        engine.onDirty = nullptr;
         engine.onOpenEditorRequested = nullptr;
         engine.onBeforeSlotRemoved = nullptr;
         editorHost.clear();
@@ -1083,12 +1441,14 @@ public:
 
         rackTitle.setBounds(r.removeFromTop(24));
         auto actions = r.removeFromTop(32);
-        bypassAllBtn.setBounds(actions.removeFromLeft(112).reduced(0, 2));
-        actions.removeFromLeft(8);
-        clearBtn.setBounds(actions.removeFromLeft(104).reduced(0, 2));
+        bypassAllBtn.setBounds(actions.removeFromLeft(100).reduced(0, 2));
+        actions.removeFromLeft(6);
+        clearBtn.setBounds(actions.removeFromLeft(90).reduced(0, 2));
+        actions.removeFromLeft(6);
+        eqBtn.setBounds(actions.removeFromLeft(44).reduced(0, 2));
         actions.removeFromLeft(10);
-        snapLabel.setBounds(actions.removeFromLeft(44));
-        const int snapW = juce::jlimit(20, 32, actions.getWidth() / kNumSnapshots - 3);
+        snapLabel.setBounds(actions.removeFromLeft(40));
+        const int snapW = juce::jlimit(16, 32, actions.getWidth() / kNumSnapshots - 3);
         for (auto& b : snapBtns)
         {
             b.setBounds(actions.removeFromLeft(snapW).reduced(0, 2));
@@ -1096,6 +1456,7 @@ public:
         }
         r.removeFromTop(8);
         rackPanel = r;
+        eqPanel.setBounds(r);
 
         auto chainArea = r.reduced(10, 8);
         auto patchRow = chainArea.removeFromTop(28);
@@ -1145,7 +1506,7 @@ public:
     // Drag and drop: plugins (from the list or hot strip) and rack rows
     bool isInterestedInDragSource(const SourceDetails& d) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible())
             return false;
         const auto s = d.description.toString();
         return s.startsWith("add:") || s.startsWith("move:");
@@ -1177,7 +1538,7 @@ public:
     // Dropping plugin files (.vst3 / .component) onto the window scans and adds them.
     bool isInterestedInFileDrag(const juce::StringArray& files) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible())
             return false;
         for (auto& f : files)
             if (isPluginFile(f)) return true;
@@ -1715,6 +2076,21 @@ private:
         });
     }
 
+    void toggleEq()
+    {
+        const bool show = ! eqPanel.isVisible();
+        if (show)
+        {
+            if (editorHost.isVisible())
+                closeInlineEditor(true);
+            eqPanel.attach(engine.getSelectedRack());
+        }
+        eqPanel.setVisible(show);
+        eqBtn.setToggleState(show, juce::dontSendNotification);
+        eqBtn.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+        repaint();
+    }
+
     void toggleInputs()
     {
         const bool show = ! inputsPanel.isVisible();
@@ -1957,6 +2333,8 @@ private:
         removeRackBtn.setEnabled(engine.getNumRacks() > 1);
         addRackBtn.setEnabled(engine.getNumRacks() < kMaxRacks);
         updatePatchCombos();
+        if (eqPanel.isVisible())
+            eqPanel.attach(sel);
 
         for (int i = 0; i < kNumSnapshots; ++i)
         {
@@ -2141,9 +2519,10 @@ private:
     int totalEffects = 0;
     juce::ListBox pluginList, rackList, racksList;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
+    EqPanel eqPanel { engine };
     InputsPanel inputsPanel { engine };
     int checking = 0;
     juce::String checkingName;

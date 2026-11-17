@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include "Sandbox.h"
+#include "ChannelEq.h"
 
 static constexpr int kMaxInputBuses = 64;                    // stereo inputs/outputs a DAW can patch
 static constexpr int kMaxRacks = 64;                         // stereo racks, like SuperRack Performer
@@ -128,6 +129,7 @@ public:
     std::array<InputBus, kMaxInputBuses> inputBuses;
 
     std::function<void()> onChanged;            // racks or chains changed (message thread)
+    std::function<void()> onDirty;              // a setting changed that should be saved (light-weight)
     std::function<void()> onLatencyChanged;     // total latency may have changed
     std::function<void(int)> onOpenEditorRequested;           // plugin mode: show a slot's editor inline
     std::function<void(juce::uint32)> onBeforeSlotRemoved;    // a hosted plugin is about to be deleted
@@ -331,6 +333,10 @@ public:
     // Racks
     int getNumRacks() const { return (int) racks.size(); }
     int getSelectedRack() const { return selected; }
+
+    // The built-in channel-strip EQ of a rack (null if there is no such rack).
+    ChannelEq* getEq(int i) { return valid(i) ? &eqOf(*racks[(size_t) i]) : nullptr; }
+    void markDirty() { if (onDirty) onDirty(); }
 
     void selectRack(int i)
     {
@@ -677,6 +683,7 @@ public:
             re->setAttribute("gain", (double) faderOf(*r).gain.load());
             re->setAttribute("mute", r->mute);
             re->setAttribute("solo", r->solo);
+            re->addChildElement(eqOf(*r).createXml().release());
 
             for (auto& s : r->slots)
             {
@@ -765,7 +772,7 @@ private:
         juce::String name;
         int inPair = -1, outPair = -1;
         bool mute = false, solo = false;
-        juce::AudioProcessorGraph::Node::Ptr inNode, faderNode;
+        juce::AudioProcessorGraph::Node::Ptr inNode, eqNode, faderNode;
         std::vector<Slot> slots;
     };
 
@@ -805,6 +812,7 @@ private:
     Rack& cur() { return *racks[(size_t) juce::jlimit(0, (int) racks.size() - 1, selected)]; }
     const Rack& cur() const { return *racks[(size_t) juce::jlimit(0, (int) racks.size() - 1, selected)]; }
 
+    static ChannelEq& eqOf(const Rack& r) { return *static_cast<ChannelEq*>(r.eqNode->getProcessor()); }
     static GainProcessor& faderOf(const Rack& r) { return *static_cast<GainProcessor*>(r.faderNode->getProcessor()); }
 
     Rack* findRack(juce::uint32 id)
@@ -822,6 +830,7 @@ private:
         r->inPair = inPair;
         r->outPair = outPair;
         r->inNode = graph.addNode(std::make_unique<GainProcessor>());
+        r->eqNode = graph.addNode(std::make_unique<ChannelEq>());
         r->faderNode = graph.addNode(std::make_unique<GainProcessor>());
         racks.push_back(std::move(r));
         return (int) racks.size() - 1;
@@ -842,6 +851,7 @@ private:
         while (! r.slots.empty())
             removeSlotFrom(r, 0);
         graph.removeNode(r.inNode->nodeID);
+        graph.removeNode(r.eqNode->nodeID);
         graph.removeNode(r.faderNode->nodeID);
         racks.erase(racks.begin() + i);
     }
@@ -863,6 +873,11 @@ private:
         r.mute = e.getBoolAttribute("mute");
         r.solo = e.getBoolAttribute("solo");
         faderOf(r).gain.store((float) e.getDoubleAttribute("gain", 1.0));
+
+        if (auto* ex = e.getChildByName("Eq"))
+            eqOf(r).loadXml(*ex);
+        else
+            eqOf(r).setDefaults();
     }
 
     void prepareGraph(double sr, int bs)
@@ -1096,7 +1111,11 @@ private:
                 for (int c = 0; c < 2; ++c)
                     link(audioIn->nodeID, r->inPair * 2 + c, r->inNode->nodeID, c);
 
-            auto prev = r->inNode->nodeID;
+            // input meter -> channel EQ -> plugin chain
+            for (int c = 0; c < 2; ++c)
+                link(r->inNode->nodeID, c, r->eqNode->nodeID, c);
+
+            auto prev = r->eqNode->nodeID;
             for (auto& s : r->slots)
             {
                 for (int c = 0; c < 2; ++c)
