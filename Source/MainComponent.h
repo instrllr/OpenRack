@@ -641,11 +641,12 @@ public:
                    16, 8, 620, 20, juce::Justification::centredLeft);
         g.setFont(juce::FontOptions(12.0f));
         const int avail = availableCols();
-        g.drawText(direct ? "Rows are inputs, columns are outputs. Click to route, click again to remove. "
-                            "Direct routes pass through the master fader but no rack. Dimmed sockets are not on your device ("
-                          : "Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. "
-                            "Dimmed sockets are not on your device right now (",
-                       + juce::String(avail) + " of 64 pairs available).",
+        const juce::String note = direct
+            ? juce::String("Rows are inputs, columns are outputs. Click to route, click again to remove. "
+                           "Direct routes pass through the master fader but no rack. ")
+            : juce::String("Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. ");
+        g.drawText(note + "Dimmed sockets are not on your device right now (" + juce::String(avail)
+                       + " of 64 pairs available).",
                    16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
     }
 
