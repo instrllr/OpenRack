@@ -8,7 +8,7 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 ## Features
 - Scan and host effect plugins (VST3, plus AudioUnit on macOS); instruments are hidden
 - **Up to 64 stereo racks** (like SuperRack Performer), each with its own plugin chain, fader, mute, solo and meters. A rack is patched from any stereo **input pair** to any stereo **output pair** (standalone: your interface's channels, up to 128 in / 128 out; plugin: the DAW's 64 input and 64 output buses)
-- **Patch bay**: a console-style crosspoint matrix (**Patch** button) with input sockets to rack inputs and rack outputs to output sockets - click a crosspoint to patch, click again to remove; Patch 1:1 and Clear all for quick starts
+- **Patch bay**: a console-style 64 x 64 stereo (128 x 128 channel) crosspoint matrix (**Patch** button): input sockets to rack inputs and rack outputs to output sockets - click a crosspoint to patch, click again to remove; Patch 1:1 and Clear all for quick starts
 - **Channel EQ in every rack** (not a plugin in the chain): high-pass, low shelf, two peaking bands and a high shelf ahead of the plugins, with a response-curve editor (drag bands, scroll for Q, double-click to flatten). Saved with the rack and snapshots
 - **Rack names and group tabs** (a vertical strip at the bottom-left): double-click a rack to name it; group racks under tabs (right-click a rack > Move to group, or the + tab) so a big session stays easy to scan. Groups are saved with the session
 - Serial plugin chain per rack: add, remove, reorder, bypass, open plugin windows (inline when running in a DAW)

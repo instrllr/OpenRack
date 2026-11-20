@@ -575,7 +575,7 @@ private:
 class PatchPanel : public juce::Component
 {
 public:
-    static constexpr int kCellW = 32, kCellH = 28, kRowHeaderW = 170, kColHeaderH = 38;
+    static constexpr int kCellW = 25, kCellH = 25, kRowHeaderW = 170, kColHeaderH = 38;
 
     explicit PatchPanel(RackEngine& e) : engine(e), grid(*this), rowHeader(*this), colHeader(*this)
     {
@@ -609,12 +609,9 @@ public:
 
     void refresh()
     {
-        const int racks = engine.getNumRacks();
-        int cols = outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs();
-        for (int r = 0; r < racks; ++r)
-            cols = juce::jmax(cols, (outputs ? engine.getRackOutputPair(r) : engine.getRackInputPair(r)) + 1);
-        columns = juce::jmin(cols, kMaxRacks * 2);
-        grid.setSize(juce::jmax(1, columns * kCellW), juce::jmax(1, racks * kCellH));
+        // Always the full 64 x 64 stereo grid (128 x 128 channels).
+        columns = kMaxInputBuses;
+        grid.setSize(columns * kCellW, kMaxRacks * kCellH);
         grid.repaint();
         rowHeader.repaint();
         colHeader.repaint();
@@ -632,20 +629,15 @@ public:
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
-        g.drawText(outputs ? "OUTPUT PATCH  -  rack outputs to output sockets"
-                           : "INPUT PATCH  -  input sockets to rack inputs",
-                   16, 8, 420, 20, juce::Justification::centredLeft);
+        g.drawText(outputs ? "OUTPUT PATCH  -  64 racks to 64 stereo outputs (128 channels)"
+                           : "INPUT PATCH  -  64 stereo inputs (128 channels) to 64 racks",
+                   16, 8, 520, 20, juce::Justification::centredLeft);
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText("Click a crosspoint to patch it, click again to remove it. Several racks can share one input; "
-                   "racks sharing an output are summed.",
+        const int avail = availableCols();
+        g.drawText("Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. "
+                   "Dimmed sockets are not on your device right now ("
+                       + juce::String(avail) + " of 64 pairs available).",
                    16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
-
-        if (columns == 0)
-        {
-            g.setFont(juce::FontOptions(15.0f));
-            g.drawText("No sockets yet - open Audio settings and enable your interface's channels.",
-                       view.getBounds(), juce::Justification::centred, true);
-        }
     }
 
     void resized() override
@@ -669,6 +661,8 @@ public:
     }
 
 private:
+    int availableCols() const { return outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs(); }
+
     int patchOf(int rack) const { return outputs ? engine.getRackOutputPair(rack) : engine.getRackInputPair(rack); }
 
     void setPatch(int rack, int pair)
@@ -716,19 +710,24 @@ private:
             const int racks = owner.engine.getNumRacks();
             const int sel = owner.engine.getSelectedRack();
             const auto clip = g.getClipBounds();
-            const int r0 = juce::jmax(0, clip.getY() / kCellH), r1 = juce::jmin(racks - 1, clip.getBottom() / kCellH);
+            const int avail = owner.availableCols();
+            const int r0 = juce::jmax(0, clip.getY() / kCellH), r1 = juce::jmin(kMaxRacks - 1, clip.getBottom() / kCellH);
             const int c0 = juce::jmax(0, clip.getX() / kCellW), c1 = juce::jmin(owner.columns - 1, clip.getRight() / kCellW);
             const auto dot = owner.outputs ? juce::Colour(0xff3ddc84) : Theme::accent();
 
             for (int r = r0; r <= r1; ++r)
             {
-                const int patched = owner.patchOf(r);
+                const bool exists = r < racks;
+                const int patched = exists ? owner.patchOf(r) : -1;
                 for (int c = c0; c <= c1; ++c)
                 {
                     auto cell = juce::Rectangle<float>((float) (c * kCellW), (float) (r * kCellH),
                                                        (float) kCellW, (float) kCellH).reduced(1.0f);
-                    const bool band = ((c / 2) % 2) == 0;
-                    g.setColour(r == sel ? Theme::row().brighter(0.08f) : (band ? Theme::row() : Theme::row().darker(0.2f)));
+                    const bool band = ((c / 4) % 2) == 0;         // groups of 4 pairs (8 channels)
+                    auto base = r == sel ? Theme::row().brighter(0.08f) : (band ? Theme::row() : Theme::row().darker(0.2f));
+                    if (! exists || c >= avail)
+                        base = base.darker(0.35f);
+                    g.setColour(base);
                     g.fillRoundedRectangle(cell, 4.0f);
 
                     if (r == hoverRow || c == hoverCol)
@@ -759,7 +758,10 @@ private:
         void mouseDown(const juce::MouseEvent& e) override
         {
             const int r = e.y / kCellH, c = e.x / kCellW;
-            if (e.x < 0 || e.y < 0 || r >= owner.engine.getNumRacks() || c >= owner.columns)
+            if (e.x < 0 || e.y < 0 || r >= kMaxRacks || c >= owner.columns)
+                return;
+            while (owner.engine.getNumRacks() <= r && owner.engine.addRack()) {}
+            if (r >= owner.engine.getNumRacks())
                 return;
             owner.engine.selectRack(r);
             owner.setPatch(r, owner.patchOf(r) == c ? -1 : c);
@@ -768,7 +770,7 @@ private:
         void hover(juce::Point<int> p)
         {
             const int r = p.y / kCellH, c = p.x / kCellW;
-            const bool ok = p.x >= 0 && p.y >= 0 && r < owner.engine.getNumRacks() && c < owner.columns;
+            const bool ok = p.x >= 0 && p.y >= 0 && r < kMaxRacks && c < owner.columns;
             const int nr = ok ? r : -1, nc = ok ? c : -1;
             if (nr != hoverRow || nc != hoverCol)
             {
@@ -791,8 +793,9 @@ private:
         {
             const int viewY = owner.view.getViewPositionY();
             const int sel = owner.engine.getSelectedRack();
-            for (int r = 0; r < owner.engine.getNumRacks(); ++r)
+            for (int r = 0; r < kMaxRacks; ++r)
             {
+                const bool exists = r < owner.engine.getNumRacks();
                 const int y = r * kCellH - viewY;
                 if (y + kCellH < 0 || y > getHeight()) continue;
 
@@ -803,6 +806,15 @@ private:
                 {
                     g.setColour(Theme::accent().withAlpha(0.2f));
                     g.fillRoundedRectangle(cell, 4.0f);
+                }
+
+                if (! exists)
+                {
+                    g.setColour(Theme::muted().withAlpha(0.5f));
+                    g.setFont(juce::FontOptions(11.0f));
+                    g.drawText(juce::String(r + 1) + "  (empty)", cell.withTrimmedLeft(14.0f).toNearestInt(),
+                               juce::Justification::centredLeft, true);
+                    continue;
                 }
 
                 const auto name = owner.engine.getRackName(r);
@@ -845,7 +857,8 @@ private:
                 if (x + kCellW < 0 || x > getWidth()) continue;
 
                 auto cell = juce::Rectangle<float>((float) x, 0.0f, (float) kCellW, (float) getHeight() - 4.0f).reduced(1.0f, 0.0f);
-                g.setColour(c == patched ? Theme::accent().withAlpha(0.35f) : Theme::row());
+                g.setColour(c == patched ? Theme::accent().withAlpha(0.35f)
+                                         : (c < owner.availableCols() ? Theme::row() : Theme::row().darker(0.35f)));
                 g.fillRoundedRectangle(cell, 4.0f);
                 if (c == owner.grid.hoverCol)
                 {
