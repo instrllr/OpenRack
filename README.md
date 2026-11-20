@@ -15,7 +15,7 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 - **Hot plugins**: star a plugin to pin it, and your most-used plugins appear automatically in a one-click strip under the toolbar and in the **Hot plugins** menu
 - Input and output meters with peak hold and clip lights, master gain, latency reporting to the DAW
 - Search bar, Bypass all, Clear rack, tooltips
-- **Shows library**: **Save show** stores the whole show (all racks, patching, EQ, snapshots, plugin state) as a `.oshow` in the app's shows library; the **Shows** button lists them to open or delete, so no hunting through folders (export/open from any file is there too; old `.orack` files still open). The show is also saved inside your DAW project
+- **Shows library**: **Save show** stores the whole show (all racks, patching, EQ, snapshots, plugin state) as a `.oshow` in the app's shows library; the **Shows** button opens a full-size library view to open, rename, delete, import or export shows (old `.orack` files still open). The show is also saved inside your DAW project
 - **64 stereo input and output buses** (VST3): switch them on in your DAW, trim each input from the **Inputs** view, and patch racks to them. FL Studio can send mixer tracks to any input; Logic's AU exposes the main input plus its one side-chain and a single output
 - **Snapshots**: 8 stored sessions (all racks, patching and faders). Same plugins = instant recall; otherwise plugins reload. They are also the plugin's 8 programs, so a DAW can automate them
 - **Crash protection**: new plugins are test-loaded in a separate process first (standalone app), plugins that crash while loading get blocked, and the standalone app offers to restore your last rack after an unexpected exit
