@@ -403,6 +403,31 @@ public:
         notify();
     }
 
+    //--------------------------------------------------------------------------
+    // Direct routes: an input pair straight to an output pair, without a rack
+    // (e.g. passing a SoundGrid channel through). Several inputs to one output are summed.
+    bool hasDirect(int inPair, int outPair) const
+    {
+        return inPair >= 0 && inPair < kMaxInputBuses && outPair >= 0 && outPair < kMaxInputBuses
+               && direct[inPair][outPair];
+    }
+
+    void setDirect(int inPair, int outPair, bool on)
+    {
+        if (inPair < 0 || inPair >= kMaxInputBuses || outPair < 0 || outPair >= kMaxInputBuses) return;
+        direct[inPair][outPair] = on;
+        rebuildConnections();
+        notify();
+    }
+
+    void clearDirect()
+    {
+        for (auto& row : direct)
+            for (auto& v : row) v = false;
+        rebuildConnections();
+        notify();
+    }
+
     juce::uint32 getRackGroup(int i) const { return valid(i) ? racks[(size_t) i]->groupId : 0; }
 
     void setRackGroup(int i, juce::uint32 groupId)
@@ -717,6 +742,16 @@ public:
         root->setAttribute("sel", selected);
         root->setAttribute("master", (double) masterGain.load());
 
+        auto* de = root->createNewChildElement("Direct");
+        for (int i = 0; i < kMaxInputBuses; ++i)
+            for (int o = 0; o < kMaxInputBuses; ++o)
+                if (direct[i][o])
+                {
+                    auto* e = de->createNewChildElement("Route");
+                    e->setAttribute("in", i);
+                    e->setAttribute("out", o);
+                }
+
         auto* ge = root->createNewChildElement("Groups");
         for (auto& g : groups)
         {
@@ -876,6 +911,16 @@ private:
 
     void applyGroupsXml(const juce::XmlElement& session)
     {
+        for (auto& row : direct)
+            for (auto& v : row) v = false;
+        if (auto* de = session.getChildByName("Direct"))
+            for (auto* e : de->getChildWithTagNameIterator("Route"))
+            {
+                const int i = e->getIntAttribute("in", -1), o = e->getIntAttribute("out", -1);
+                if (i >= 0 && i < kMaxInputBuses && o >= 0 && o < kMaxInputBuses)
+                    direct[i][o] = true;
+            }
+
         groups.clear();
         nextGroupId = 1;
         if (auto* ge = session.getChildByName("Groups"))
@@ -1214,6 +1259,12 @@ private:
                 for (int c = 0; c < 2; ++c)
                     link(r->faderNode->nodeID, c, audioOut->nodeID, r->outPair * 2 + c);
         }
+
+        for (int i = 0; i < kMaxInputBuses; ++i)
+            for (int o = 0; o < kMaxInputBuses; ++o)
+                if (direct[i][o])
+                    for (int c = 0; c < 2; ++c)
+                        link(audioIn->nodeID, i * 2 + c, audioOut->nodeID, o * 2 + c);
     }
 
     void notify()
@@ -1239,6 +1290,7 @@ private:
 
     std::vector<std::unique_ptr<Rack>> racks;
     std::vector<Group> groups;
+    bool direct[kMaxInputBuses][kMaxInputBuses] = {};
     juce::uint32 nextGroupId = 1;
     int selected = 0;
     juce::uint32 nextRackId = 1;

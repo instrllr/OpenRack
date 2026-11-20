@@ -586,10 +586,16 @@ public:
         addAndMakeVisible(rowHeader);
         addAndMakeVisible(colHeader);
 
-        for (auto* b : { &inBtn, &outBtn, &defaultBtn, &clearBtn })
+        for (auto* b : { &inBtn, &outBtn, &directBtn, &defaultBtn, &clearBtn })
             addAndMakeVisible(b);
         inBtn.setButtonText("Input patch");
         outBtn.setButtonText("Output patch");
+        directBtn.setButtonText("Direct I/O");
+        directBtn.setTooltip("Route an input socket straight to an output socket, without a rack");
+        directBtn.setClickingTogglesState(false);
+        directBtn.setColour(juce::TextButton::buttonOnColourId, Theme::warning());
+        directBtn.setColour(juce::TextButton::textColourOnId, juce::Colour(0xff1a1200));
+        directBtn.onClick = [this] { setMode(2); };
         defaultBtn.setButtonText("Patch 1:1");
         clearBtn.setButtonText("Clear all");
         inBtn.setClickingTogglesState(false);
@@ -598,20 +604,20 @@ public:
         outBtn.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
         inBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
         outBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-        inBtn.onClick = [this] { setMode(false); };
-        outBtn.onClick = [this] { setMode(true); };
+        inBtn.onClick = [this] { setMode(0); };
+        outBtn.onClick = [this] { setMode(1); };
         defaultBtn.setTooltip("Patch rack 1 to socket pair 1-2, rack 2 to 3-4, and so on");
         clearBtn.setTooltip("Remove every patch in this view");
         defaultBtn.onClick = [this] { patchStraight(); };
         clearBtn.onClick = [this] { clearAll(); };
-        setMode(false);
+        setMode(0);
     }
 
     void refresh()
     {
         // Always the full 64 x 64 stereo grid (128 x 128 channels).
         columns = kMaxInputBuses;
-        grid.setSize(columns * kCellW, kMaxRacks * kCellH);
+        grid.setSize(columns * kCellW, rowCount() * kCellH);
         grid.repaint();
         rowHeader.repaint();
         colHeader.repaint();
@@ -629,13 +635,16 @@ public:
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
-        g.drawText(outputs ? "OUTPUT PATCH  -  64 racks to 64 stereo outputs (128 channels)"
-                           : "INPUT PATCH  -  64 stereo inputs (128 channels) to 64 racks",
-                   16, 8, 520, 20, juce::Justification::centredLeft);
+        g.drawText(direct ? "DIRECT I/O  -  64 stereo inputs straight to 64 stereo outputs, no rack in between"
+                          : outputs ? "OUTPUT PATCH  -  64 racks to 64 stereo outputs (128 channels)"
+                                    : "INPUT PATCH  -  64 stereo inputs (128 channels) to 64 racks",
+                   16, 8, 620, 20, juce::Justification::centredLeft);
         g.setFont(juce::FontOptions(12.0f));
         const int avail = availableCols();
-        g.drawText("Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. "
-                   "Dimmed sockets are not on your device right now ("
+        g.drawText(direct ? "Rows are inputs, columns are outputs. Click to route, click again to remove. "
+                            "Direct routes pass through the master fader but no rack. Dimmed sockets are not on your device ("
+                          : "Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. "
+                            "Dimmed sockets are not on your device right now (",
                        + juce::String(avail) + " of 64 pairs available).",
                    16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
     }
@@ -648,6 +657,8 @@ public:
         top.removeFromRight(6);
         defaultBtn.setBounds(top.removeFromRight(96).reduced(0, 8));
         top.removeFromRight(20);
+        directBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
+        top.removeFromRight(4);
         outBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
         top.removeFromRight(4);
         inBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
@@ -661,7 +672,8 @@ public:
     }
 
 private:
-    int availableCols() const { return outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs(); }
+    int availableCols() const { return outputs || direct ? engine.getNumOutputPairs() : engine.getNumInputPairs(); }
+    int rowCount() const { return direct ? kMaxInputBuses : kMaxRacks; }
 
     int patchOf(int rack) const { return outputs ? engine.getRackOutputPair(rack) : engine.getRackInputPair(rack); }
 
@@ -671,16 +683,28 @@ private:
         else         engine.setRackInputPair(rack, pair);
     }
 
-    void setMode(bool toOutputs)
+    void setMode(int m)
     {
-        outputs = toOutputs;
-        inBtn.setToggleState(! outputs, juce::dontSendNotification);
-        outBtn.setToggleState(outputs, juce::dontSendNotification);
+        outputs = (m == 1);
+        direct = (m == 2);
+        inBtn.setToggleState(m == 0, juce::dontSendNotification);
+        outBtn.setToggleState(m == 1, juce::dontSendNotification);
+        directBtn.setToggleState(m == 2, juce::dontSendNotification);
+        defaultBtn.setTooltip(direct ? "Route input 1-2 to output 1-2, 3-4 to 3-4, and so on"
+                                     : "Patch rack 1 to socket pair 1-2, rack 2 to 3-4, and so on");
         refresh();
     }
 
     void patchStraight()
     {
+        if (direct)
+        {
+            const int n = juce::jmin(engine.getNumInputPairs(), engine.getNumOutputPairs());
+            for (int i = 0; i < n; ++i)
+                engine.setDirect(i, i, true);
+            return;
+        }
+
         const int cols = outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs();
         for (int r = 0; r < engine.getNumRacks(); ++r)
             setPatch(r, r < cols ? r : -1);
@@ -688,6 +712,12 @@ private:
 
     void clearAll()
     {
+        if (direct)
+        {
+            engine.clearDirect();
+            return;
+        }
+
         for (int r = 0; r < engine.getNumRacks(); ++r)
             setPatch(r, -1);
     }
@@ -708,17 +738,19 @@ private:
         void paint(juce::Graphics& g) override
         {
             const int racks = owner.engine.getNumRacks();
-            const int sel = owner.engine.getSelectedRack();
+            const int sel = owner.direct ? -1 : owner.engine.getSelectedRack();
             const auto clip = g.getClipBounds();
             const int avail = owner.availableCols();
-            const int r0 = juce::jmax(0, clip.getY() / kCellH), r1 = juce::jmin(kMaxRacks - 1, clip.getBottom() / kCellH);
+            const int rowsN = owner.rowCount();
+            const int availRows = owner.direct ? owner.engine.getNumInputPairs() : racks;
+            const int r0 = juce::jmax(0, clip.getY() / kCellH), r1 = juce::jmin(rowsN - 1, clip.getBottom() / kCellH);
             const int c0 = juce::jmax(0, clip.getX() / kCellW), c1 = juce::jmin(owner.columns - 1, clip.getRight() / kCellW);
-            const auto dot = owner.outputs ? juce::Colour(0xff3ddc84) : Theme::accent();
+            const auto dot = owner.direct ? Theme::warning() : owner.outputs ? juce::Colour(0xff3ddc84) : Theme::accent();
 
             for (int r = r0; r <= r1; ++r)
             {
-                const bool exists = r < racks;
-                const int patched = exists ? owner.patchOf(r) : -1;
+                const bool exists = r < availRows;
+                const int patched = (exists && ! owner.direct) ? owner.patchOf(r) : -1;
                 for (int c = c0; c <= c1; ++c)
                 {
                     auto cell = juce::Rectangle<float>((float) (c * kCellW), (float) (r * kCellH),
@@ -737,7 +769,7 @@ private:
                     }
 
                     auto centre = cell.getCentre();
-                    if (c == patched)
+                    if (owner.direct ? owner.engine.hasDirect(r, c) : c == patched)
                     {
                         g.setColour(dot);
                         g.fillEllipse(centre.x - 7.0f, centre.y - 7.0f, 14.0f, 14.0f);
@@ -758,8 +790,13 @@ private:
         void mouseDown(const juce::MouseEvent& e) override
         {
             const int r = e.y / kCellH, c = e.x / kCellW;
-            if (e.x < 0 || e.y < 0 || r >= kMaxRacks || c >= owner.columns)
+            if (e.x < 0 || e.y < 0 || r >= owner.rowCount() || c >= owner.columns)
                 return;
+            if (owner.direct)
+            {
+                owner.engine.setDirect(r, c, ! owner.engine.hasDirect(r, c));
+                return;
+            }
             while (owner.engine.getNumRacks() <= r && owner.engine.addRack()) {}
             if (r >= owner.engine.getNumRacks())
                 return;
@@ -770,7 +807,7 @@ private:
         void hover(juce::Point<int> p)
         {
             const int r = p.y / kCellH, c = p.x / kCellW;
-            const bool ok = p.x >= 0 && p.y >= 0 && r < kMaxRacks && c < owner.columns;
+            const bool ok = p.x >= 0 && p.y >= 0 && r < owner.rowCount() && c < owner.columns;
             const int nr = ok ? r : -1, nc = ok ? c : -1;
             if (nr != hoverRow || nc != hoverCol)
             {
@@ -793,9 +830,10 @@ private:
         {
             const int viewY = owner.view.getViewPositionY();
             const int sel = owner.engine.getSelectedRack();
-            for (int r = 0; r < kMaxRacks; ++r)
+            for (int r = 0; r < owner.rowCount(); ++r)
             {
-                const bool exists = r < owner.engine.getNumRacks();
+                const bool exists = owner.direct ? r < owner.engine.getNumInputPairs()
+                                                 : r < owner.engine.getNumRacks();
                 const int y = r * kCellH - viewY;
                 if (y + kCellH < 0 || y > getHeight()) continue;
 
@@ -806,6 +844,15 @@ private:
                 {
                     g.setColour(Theme::accent().withAlpha(0.2f));
                     g.fillRoundedRectangle(cell, 4.0f);
+                }
+
+                if (owner.direct)
+                {
+                    g.setColour(exists ? Theme::muted() : Theme::muted().withAlpha(0.5f));
+                    g.setFont(juce::FontOptions(11.5f));
+                    g.drawText("IN  " + pairName(r), cell.withTrimmedLeft(10.0f).toNearestInt(),
+                               juce::Justification::centredLeft, true);
+                    continue;
                 }
 
                 if (! exists)
@@ -836,7 +883,7 @@ private:
         void mouseDown(const juce::MouseEvent& e) override
         {
             const int r = (e.y + owner.view.getViewPositionY()) / kCellH;
-            if (r >= 0 && r < owner.engine.getNumRacks())
+            if (! owner.direct && r >= 0 && r < owner.engine.getNumRacks())
                 owner.engine.selectRack(r);
         }
 
@@ -850,7 +897,7 @@ private:
         void paint(juce::Graphics& g) override
         {
             const int viewX = owner.view.getViewPositionX();
-            const int patched = owner.engine.getNumRacks() > 0 ? owner.patchOf(owner.engine.getSelectedRack()) : -1;
+            const int patched = (! owner.direct && owner.engine.getNumRacks() > 0) ? owner.patchOf(owner.engine.getSelectedRack()) : -1;
             for (int c = 0; c < owner.columns; ++c)
             {
                 const int x = c * kCellW - viewX;
@@ -881,13 +928,13 @@ private:
     void refreshHeaders() { rowHeader.repaint(); colHeader.repaint(); }
 
     RackEngine& engine;
-    bool outputs = false;
+    bool outputs = false, direct = false;
     int columns = 0;
     ScrollView view;
     Grid grid;
     RowHeader rowHeader;
     ColHeader colHeader;
-    juce::TextButton inBtn, outBtn, defaultBtn, clearBtn;
+    juce::TextButton inBtn, outBtn, directBtn, defaultBtn, clearBtn;
 };
 
 // Full-size view of the shows library: every saved show in a list, with actions on the right.
