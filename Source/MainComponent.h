@@ -17,6 +17,13 @@ static int measureText(const juce::String& text, float height, bool bold = false
 //==============================================================================
 // Vertical stereo level meter with dB ticks, peak hold and a clip light on top.
 // `source(ch)` returns the peak since it was last asked (0 = left, 1 = right).
+// The colour a rack is shown in: the one the user picked, or an automatic tint from its name.
+inline juce::Colour rackColour(const RackEngine& e, int rack, const juce::String& name)
+{
+    const auto c = e.getRackColour(rack);
+    return c != 0 ? juce::Colour(c) : Theme::tint(name);
+}
+
 class LevelMeter : public juce::Component,
                    public juce::SettableTooltipClient,
                    private juce::Timer
@@ -866,7 +873,7 @@ private:
                 }
 
                 const auto name = owner.engine.getRackName(r);
-                g.setColour(Theme::tint(name));
+                g.setColour(rackColour(owner.engine, r, name));
                 g.fillRoundedRectangle(cell.getX() + 4.0f, cell.getY() + 5.0f, 4.0f, cell.getHeight() - 10.0f, 2.0f);
                 g.setColour(r == sel ? Theme::text() : Theme::muted());
                 g.setFont(juce::FontOptions(12.0f, r == sel ? juce::Font::bold : juce::Font::plain));
@@ -1298,6 +1305,8 @@ public:
     {
         row = r;
         name = engine.getRackName(r);
+        colour = rackColour(engine, r, name);
+        customColour = engine.getRackColour(r) != 0;
         const int n = engine.getRackNumSlots(r);
         details = "In " + pairName(engine.getRackInputPair(r)) + "  >  Out " + pairName(engine.getRackOutputPair(r))
                   + "   -   " + juce::String(n) + (n == 1 ? " plugin" : " plugins");
@@ -1308,8 +1317,13 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(mute.getToggleState() ? Theme::muted() : Theme::tint(name));
-        g.fillRoundedRectangle(8.0f, 10.0f, 4.0f, (float) getHeight() - 20.0f, 2.0f);
+        if (customColour)
+        {
+            g.setColour(colour.withAlpha(mute.getToggleState() ? 0.07f : 0.2f));
+            g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(2.0f), 8.0f);
+        }
+        g.setColour(mute.getToggleState() ? Theme::muted() : colour);
+        g.fillRoundedRectangle(8.0f, 10.0f, customColour ? 6.0f : 4.0f, (float) getHeight() - 20.0f, 2.0f);
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
@@ -1366,6 +1380,8 @@ private:
     RackEngine& engine;
     int row = 0;
     juce::String name, details;
+    juce::Colour colour = juce::Colours::grey;
+    bool customColour = false;
     juce::TextButton mute, solo;
     float level[2] { 0.0f, 0.0f };
 };
@@ -3123,6 +3139,16 @@ private:
         });
     }
 
+    struct ColourChoice { const char* name; juce::uint32 argb; };
+
+    static std::vector<ColourChoice> colourChoices()
+    {
+        return { { "Automatic", 0 },           { "Red", 0xffff5c5c },    { "Orange", 0xffff9a3d },
+                 { "Yellow", 0xffffd43b },     { "Green", 0xff3ddc84 },  { "Teal", 0xff22c7b8 },
+                 { "Blue", 0xff4f8cff },       { "Purple", 0xff9b6bff }, { "Pink", 0xffff6bb5 },
+                 { "White", 0xffe8ebf2 } };
+    }
+
     void showRackMenu(int rack)
     {
         juce::PopupMenu m;
@@ -3137,10 +3163,45 @@ private:
         groupsMenu.addItem(3, "New group...");
         m.addSubMenu("Move to group", groupsMenu);
 
+        const auto swatches = colourChoices();
+        const auto currentColour = engine.getRackColour(rack);
+        juce::PopupMenu colourMenu, groupColourMenu;
+        for (int i = 0; i < (int) swatches.size(); ++i)
+        {
+            const auto& sw = swatches[(size_t) i];
+            const auto text = juce::String(juce::CharPointer_UTF8("\xe2\x96\xa0  ")) + sw.name;
+            if (sw.argb == 0)
+            {
+                colourMenu.addItem(200 + i, "Automatic", true, currentColour == 0);
+                groupColourMenu.addItem(300 + i, "Automatic");
+            }
+            else
+            {
+                colourMenu.addColouredItem(200 + i, text, juce::Colour(sw.argb), true, currentColour == sw.argb);
+                groupColourMenu.addColouredItem(300 + i, text, juce::Colour(sw.argb));
+            }
+        }
+        m.addSubMenu("Color", colourMenu);
+        if (current != 0)
+            m.addSubMenu("Color whole group", groupColourMenu);
+
         juce::Component::SafePointer<MainComponent> safe(this);
-        m.showMenuAsync(juce::PopupMenu::Options(), [safe, rack](int r)
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, rack, current](int r)
         {
             if (safe == nullptr || r <= 0) return;
+            const auto choices = colourChoices();
+            if (r >= 200 && r < 200 + (int) choices.size())
+            {
+                safe->engine.setRackColour(rack, choices[(size_t) (r - 200)].argb);
+                return;
+            }
+            if (r >= 300 && r < 300 + (int) choices.size())
+            {
+                for (int i = 0; i < safe->engine.getNumRacks(); ++i)
+                    if (safe->engine.getRackGroup(i) == current)
+                        safe->engine.setRackColour(i, choices[(size_t) (r - 300)].argb);
+                return;
+            }
             if (r == 1)      safe->renameRack(rack);
             else if (r == 2) { safe->engine.setRackGroup(rack, 0); }
             else if (r == 3) safe->newGroup(rack);
@@ -3298,6 +3359,8 @@ private:
         rackTitle.setText(title, juce::dontSendNotification);
 
         rackStripLabel.setText(engine.getRackName(sel), juce::dontSendNotification);
+        rackStripLabel.setColour(juce::Label::textColourId,
+                                 engine.getRackColour(sel) != 0 ? juce::Colour(engine.getRackColour(sel)) : Theme::text());
         rackStripLabel.setTooltip("Rack " + juce::String(sel + 1) + ": " + engine.getRackName(sel));
 
         rebuildVisibleRacks();

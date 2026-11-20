@@ -428,6 +428,16 @@ public:
         notify();
     }
 
+    // Colour used to colour-code a rack (ARGB; 0 = automatic).
+    juce::uint32 getRackColour(int i) const { return valid(i) ? racks[(size_t) i]->colour : 0; }
+
+    void setRackColour(int i, juce::uint32 argb)
+    {
+        if (! valid(i)) return;
+        racks[(size_t) i]->colour = argb;
+        notify();
+    }
+
     juce::uint32 getRackGroup(int i) const { return valid(i) ? racks[(size_t) i]->groupId : 0; }
 
     void setRackGroup(int i, juce::uint32 groupId)
@@ -765,6 +775,8 @@ public:
             auto* re = root->createNewChildElement("Rack");
             re->setAttribute("name", r->name);
             re->setAttribute("group", (int) r->groupId);
+            if (r->colour != 0)
+                re->setAttribute("color", juce::String::toHexString((int) r->colour));
             re->setAttribute("in", r->inPair);
             re->setAttribute("out", r->outPair);
             re->setAttribute("gain", (double) faderOf(*r).gain.load());
@@ -858,6 +870,7 @@ private:
         juce::uint32 id = 0;
         juce::String name;
         juce::uint32 groupId = 0;
+        juce::uint32 colour = 0;
         int inPair = -1, outPair = -1;
         bool mute = false, solo = false;
         juce::AudioProcessorGraph::Node::Ptr inNode, eqNode, faderNode;
@@ -995,6 +1008,7 @@ private:
         r.name = e.getStringAttribute("name", r.name);
         const auto gid = (juce::uint32) e.getIntAttribute("group", 0);
         r.groupId = groupExists(gid) ? gid : 0;
+        r.colour = (juce::uint32) e.getStringAttribute("color").getHexValue32();
         r.inPair = e.getIntAttribute("in", -1);
         r.outPair = e.getIntAttribute("out", -1);
         r.mute = e.getBoolAttribute("mute");
