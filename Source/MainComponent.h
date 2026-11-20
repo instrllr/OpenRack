@@ -938,6 +938,109 @@ private:
     juce::TextButton inBtn, outBtn, directBtn, defaultBtn, clearBtn;
 };
 
+// Tick the racks that belong to a group. Changes apply straight away.
+class GroupPicker : public juce::Component
+{
+public:
+    GroupPicker(RackEngine& e, juce::uint32 groupId) : engine(e), gid(groupId)
+    {
+        title.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+        addAndMakeVisible(title);
+        hint.setColour(juce::Label::textColourId, Theme::muted());
+        hint.setFont(juce::FontOptions(12.0f));
+        hint.setText("Tick a rack to put it in this group. Racks that are in another group move over.",
+                     juce::dontSendNotification);
+        addAndMakeVisible(hint);
+
+        for (int i = 0; i < e.getNumRacks(); ++i)
+        {
+            auto* b = boxes.add(new juce::ToggleButton());
+            b->setColour(juce::ToggleButton::textColourId, Theme::text());
+            b->onClick = [this, i] { engine.setRackGroup(i, boxes[i]->getToggleState() ? gid : 0); update(); };
+            content.addAndMakeVisible(b);
+        }
+
+        viewport.setViewedComponent(&content, false);
+        addAndMakeVisible(viewport);
+
+        for (auto* b : { &allBtn, &noneBtn, &doneBtn })
+            addAndMakeVisible(b);
+        allBtn.setButtonText("Select all");
+        noneBtn.setButtonText("Select none");
+        doneBtn.setButtonText("Done");
+        allBtn.onClick = [this] { setAll(true); };
+        noneBtn.onClick = [this] { setAll(false); };
+        doneBtn.onClick = [this]
+        {
+            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+                dw->exitModalState(0);
+        };
+        update();
+        setSize(460, 520);
+    }
+
+    void paint(juce::Graphics& g) override { g.fillAll(Theme::background()); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(14, 12);
+        title.setBounds(r.removeFromTop(22));
+        hint.setBounds(r.removeFromTop(20));
+        r.removeFromTop(6);
+        auto foot = r.removeFromBottom(34);
+        r.removeFromBottom(8);
+        doneBtn.setBounds(foot.removeFromRight(90));
+        foot.removeFromRight(8);
+        noneBtn.setBounds(foot.removeFromRight(100));
+        foot.removeFromRight(8);
+        allBtn.setBounds(foot.removeFromRight(100));
+
+        viewport.setBounds(r);
+        const int w = juce::jmax(100, viewport.getMaximumVisibleWidth());
+        content.setSize(w, boxes.size() * 28);
+        for (int i = 0; i < boxes.size(); ++i)
+            boxes[i]->setBounds(4, i * 28, w - 8, 28);
+    }
+
+private:
+    juce::String groupName(juce::uint32 id) const
+    {
+        for (int i = 0; i < engine.getNumGroups(); ++i)
+            if (engine.getGroupId(i) == id) return engine.getGroupName(i);
+        return {};
+    }
+
+    void update()
+    {
+        title.setText("Racks in \"" + groupName(gid) + "\"", juce::dontSendNotification);
+        for (int i = 0; i < boxes.size(); ++i)
+        {
+            const auto g = engine.getRackGroup(i);
+            auto text = juce::String(i + 1) + "   " + engine.getRackName(i);
+            if (g != 0 && g != gid)
+                text += "     (in " + groupName(g) + ")";
+            boxes[i]->setButtonText(text);
+            boxes[i]->setToggleState(g == gid, juce::dontSendNotification);
+        }
+    }
+
+    void setAll(bool on)
+    {
+        for (int i = 0; i < boxes.size(); ++i)
+            if (on || engine.getRackGroup(i) == gid)
+                engine.setRackGroup(i, on ? gid : 0);
+        update();
+    }
+
+    RackEngine& engine;
+    juce::uint32 gid;
+    juce::Label title, hint;
+    juce::Viewport viewport;
+    juce::Component content;
+    juce::OwnedArray<juce::ToggleButton> boxes;
+    juce::TextButton allBtn, noneBtn, doneBtn;
+};
+
 // Full-size view of the shows library: every saved show in a list, with actions on the right.
 class ShowsPanel : public juce::Component, private juce::ListBoxModel
 {
@@ -1656,7 +1759,7 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn, &groupsBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -1666,6 +1769,9 @@ public:
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
         inputsBtn.setButtonText("Inputs");
+        groupsBtn.setButtonText("Add racks to group...");
+        groupsBtn.setTooltip("Choose which existing racks belong to the open group tab");
+        groupsBtn.onClick = [this] { groupsButtonClicked(); };
         patchBtn.setButtonText("Patch");
         patchBtn.setTooltip("Patch bay: connect input sockets to racks and racks to output sockets");
         patchBtn.onClick = [this] { togglePatch(); };
@@ -2072,7 +2178,8 @@ public:
         auto rackBtns = racksCol.removeFromTop(32);
         addRackBtn.setBounds(rackBtns.removeFromLeft(rackBtns.getWidth() / 2).reduced(0, 2).withTrimmedRight(3));
         removeRackBtn.setBounds(rackBtns.reduced(0, 2).withTrimmedLeft(3));
-        racksCol.removeFromTop(8);
+        groupsBtn.setBounds(racksCol.removeFromTop(32).reduced(0, 2));
+        racksCol.removeFromTop(6);
 
         // Mixer strips (vertical faders and meters) under the racks list
         mixerPanel = racksCol.removeFromBottom(juce::jmin(260, racksCol.getHeight() / 2));
@@ -2927,11 +3034,11 @@ private:
 
     //--------------------------------------------------------------------------
     // Groups (tabs above the racks list)
-    void newGroup(int moveRack)
+    void newGroup(int moveRack, std::function<void(juce::uint32)> andThen = {})
     {
         juce::Component::SafePointer<MainComponent> safe(this);
         promptText("New group", "Name for the new group (it becomes a tab):", {},
-                   [safe, moveRack](const juce::String& name)
+                   [safe, moveRack, andThen](const juce::String& name)
                    {
                        if (safe == nullptr) return;
                        const auto id = safe->engine.addGroup(name);
@@ -2939,12 +3046,54 @@ private:
                            safe->engine.setRackGroup(moveRack, id);
                        safe->activeGroup = (int) id;
                        safe->refresh();
+                       if (andThen) andThen(id);
                    });
+    }
+
+    void showGroupPicker(juce::uint32 id)
+    {
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned(new GroupPicker(engine, id));
+        o.dialogTitle = "Add racks to group";
+        o.dialogBackgroundColour = Theme::background();
+        o.componentToCentreAround = this;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = true;
+        o.launchAsync();
+    }
+
+    // The "Groups..." button: pick racks for the open tab (or choose / create a group first).
+    void groupsButtonClicked()
+    {
+        if (activeGroup >= 0)
+        {
+            showGroupPicker((juce::uint32) activeGroup);
+            return;
+        }
+
+        juce::PopupMenu m;
+        for (int i = 0; i < engine.getNumGroups(); ++i)
+            m.addItem(100 + i, "Add racks to \"" + engine.getGroupName(i) + "\"...");
+        if (engine.getNumGroups() > 0)
+            m.addSeparator();
+        m.addItem(1, "New group...");
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(groupsBtn), [safe](int r)
+        {
+            if (safe == nullptr || r <= 0) return;
+            if (r == 1)
+                safe->newGroup(-1, [safe](juce::uint32 id) { if (safe != nullptr) safe->showGroupPicker(id); });
+            else if (r >= 100 && r - 100 < safe->engine.getNumGroups())
+                safe->showGroupPicker(safe->engine.getGroupId(r - 100));
+        });
     }
 
     void showGroupMenu(juce::uint32 id)
     {
         juce::PopupMenu m;
+        m.addItem(3, "Add racks to this group...");
         m.addItem(1, "Rename group...");
         m.addItem(2, "Delete group (racks are kept)");
 
@@ -2952,7 +3101,9 @@ private:
         m.showMenuAsync(juce::PopupMenu::Options(), [safe, id](int r)
         {
             if (safe == nullptr) return;
-            if (r == 1)
+            if (r == 3)
+                safe->showGroupPicker(id);
+            else if (r == 1)
             {
                 juce::String current;
                 for (int i = 0; i < safe->engine.getNumGroups(); ++i)
@@ -3546,7 +3697,7 @@ private:
     juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
     EqPanel eqPanel { engine };
