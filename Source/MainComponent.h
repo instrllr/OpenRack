@@ -570,6 +570,313 @@ private:
     std::vector<std::unique_ptr<InputStrip>> strips;
 };
 
+// Patch bay: a crosspoint matrix in the style of a console patcher. Rows are the racks, columns are
+// the stereo sockets (inputs or outputs). Click a crosspoint to patch, click it again to unpatch.
+class PatchPanel : public juce::Component
+{
+public:
+    static constexpr int kCellW = 32, kCellH = 28, kRowHeaderW = 170, kColHeaderH = 38;
+
+    explicit PatchPanel(RackEngine& e) : engine(e), grid(*this), rowHeader(*this), colHeader(*this)
+    {
+        view.setViewedComponent(&grid, false);
+        view.setScrollBarsShown(true, true);
+        view.onScroll = [this] { rowHeader.repaint(); colHeader.repaint(); };
+        addAndMakeVisible(view);
+        addAndMakeVisible(rowHeader);
+        addAndMakeVisible(colHeader);
+
+        for (auto* b : { &inBtn, &outBtn, &defaultBtn, &clearBtn })
+            addAndMakeVisible(b);
+        inBtn.setButtonText("Input patch");
+        outBtn.setButtonText("Output patch");
+        defaultBtn.setButtonText("Patch 1:1");
+        clearBtn.setButtonText("Clear all");
+        inBtn.setClickingTogglesState(false);
+        outBtn.setClickingTogglesState(false);
+        inBtn.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+        outBtn.setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+        inBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        outBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        inBtn.onClick = [this] { setMode(false); };
+        outBtn.onClick = [this] { setMode(true); };
+        defaultBtn.setTooltip("Patch rack 1 to socket pair 1-2, rack 2 to 3-4, and so on");
+        clearBtn.setTooltip("Remove every patch in this view");
+        defaultBtn.onClick = [this] { patchStraight(); };
+        clearBtn.onClick = [this] { clearAll(); };
+        setMode(false);
+    }
+
+    void refresh()
+    {
+        const int racks = engine.getNumRacks();
+        int cols = outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs();
+        for (int r = 0; r < racks; ++r)
+            cols = juce::jmax(cols, (outputs ? engine.getRackOutputPair(r) : engine.getRackInputPair(r)) + 1);
+        columns = juce::jmin(cols, kMaxRacks * 2);
+        grid.setSize(juce::jmax(1, columns * kCellW), juce::jmax(1, racks * kCellH));
+        grid.repaint();
+        rowHeader.repaint();
+        colHeader.repaint();
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(Theme::background());
+        auto p = getLocalBounds().toFloat();
+        g.setColour(Theme::panel());
+        g.fillRoundedRectangle(p, 10.0f);
+        g.setColour(Theme::outline());
+        g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+        g.drawText(outputs ? "OUTPUT PATCH  -  rack outputs to output sockets"
+                           : "INPUT PATCH  -  input sockets to rack inputs",
+                   16, 8, 420, 20, juce::Justification::centredLeft);
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText("Click a crosspoint to patch it, click again to remove it. Several racks can share one input; "
+                   "racks sharing an output are summed.",
+                   16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
+
+        if (columns == 0)
+        {
+            g.setFont(juce::FontOptions(15.0f));
+            g.drawText("No sockets yet - open Audio settings and enable your interface's channels.",
+                       view.getBounds(), juce::Justification::centred, true);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(8, 6);
+        auto top = r.removeFromTop(48);
+        clearBtn.setBounds(top.removeFromRight(96).reduced(0, 8));
+        top.removeFromRight(6);
+        defaultBtn.setBounds(top.removeFromRight(96).reduced(0, 8));
+        top.removeFromRight(20);
+        outBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
+        top.removeFromRight(4);
+        inBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
+
+        auto body = r.withTrimmedTop(2);
+        colHeader.setBounds(body.getX() + kRowHeaderW, body.getY(), body.getWidth() - kRowHeaderW, kColHeaderH);
+        rowHeader.setBounds(body.getX(), body.getY() + kColHeaderH, kRowHeaderW, body.getHeight() - kColHeaderH);
+        view.setBounds(body.getX() + kRowHeaderW, body.getY() + kColHeaderH,
+                       body.getWidth() - kRowHeaderW, body.getHeight() - kColHeaderH);
+        refresh();
+    }
+
+private:
+    int patchOf(int rack) const { return outputs ? engine.getRackOutputPair(rack) : engine.getRackInputPair(rack); }
+
+    void setPatch(int rack, int pair)
+    {
+        if (outputs) engine.setRackOutputPair(rack, pair);
+        else         engine.setRackInputPair(rack, pair);
+    }
+
+    void setMode(bool toOutputs)
+    {
+        outputs = toOutputs;
+        inBtn.setToggleState(! outputs, juce::dontSendNotification);
+        outBtn.setToggleState(outputs, juce::dontSendNotification);
+        refresh();
+    }
+
+    void patchStraight()
+    {
+        const int cols = outputs ? engine.getNumOutputPairs() : engine.getNumInputPairs();
+        for (int r = 0; r < engine.getNumRacks(); ++r)
+            setPatch(r, r < cols ? r : -1);
+    }
+
+    void clearAll()
+    {
+        for (int r = 0; r < engine.getNumRacks(); ++r)
+            setPatch(r, -1);
+    }
+
+    static juce::String pairName(int pair) { return juce::String(pair * 2 + 1) + "-" + juce::String(pair * 2 + 2); }
+
+    //----------------------------------------------------------------------
+    struct ScrollView : juce::Viewport
+    {
+        std::function<void()> onScroll;
+        void visibleAreaChanged(const juce::Rectangle<int>&) override { if (onScroll) onScroll(); }
+    };
+
+    struct Grid : juce::Component
+    {
+        explicit Grid(PatchPanel& o) : owner(o) {}
+
+        void paint(juce::Graphics& g) override
+        {
+            const int racks = owner.engine.getNumRacks();
+            const int sel = owner.engine.getSelectedRack();
+            const auto clip = g.getClipBounds();
+            const int r0 = juce::jmax(0, clip.getY() / kCellH), r1 = juce::jmin(racks - 1, clip.getBottom() / kCellH);
+            const int c0 = juce::jmax(0, clip.getX() / kCellW), c1 = juce::jmin(owner.columns - 1, clip.getRight() / kCellW);
+            const auto dot = owner.outputs ? juce::Colour(0xff3ddc84) : Theme::accent();
+
+            for (int r = r0; r <= r1; ++r)
+            {
+                const int patched = owner.patchOf(r);
+                for (int c = c0; c <= c1; ++c)
+                {
+                    auto cell = juce::Rectangle<float>((float) (c * kCellW), (float) (r * kCellH),
+                                                       (float) kCellW, (float) kCellH).reduced(1.0f);
+                    const bool band = ((c / 2) % 2) == 0;
+                    g.setColour(r == sel ? Theme::row().brighter(0.08f) : (band ? Theme::row() : Theme::row().darker(0.2f)));
+                    g.fillRoundedRectangle(cell, 4.0f);
+
+                    if (r == hoverRow || c == hoverCol)
+                    {
+                        g.setColour(Theme::accent().withAlpha(0.12f));
+                        g.fillRoundedRectangle(cell, 4.0f);
+                    }
+
+                    auto centre = cell.getCentre();
+                    if (c == patched)
+                    {
+                        g.setColour(dot);
+                        g.fillEllipse(centre.x - 7.0f, centre.y - 7.0f, 14.0f, 14.0f);
+                    }
+                    else if (r == hoverRow && c == hoverCol)
+                    {
+                        g.setColour(dot.withAlpha(0.35f));
+                        g.fillEllipse(centre.x - 6.0f, centre.y - 6.0f, 12.0f, 12.0f);
+                    }
+                }
+            }
+        }
+
+        void mouseMove(const juce::MouseEvent& e) override { hover(e.getPosition()); }
+        void mouseDrag(const juce::MouseEvent& e) override { hover(e.getPosition()); }
+        void mouseExit(const juce::MouseEvent&) override { hoverRow = hoverCol = -1; owner.refreshHeaders(); repaint(); }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            const int r = e.y / kCellH, c = e.x / kCellW;
+            if (e.x < 0 || e.y < 0 || r >= owner.engine.getNumRacks() || c >= owner.columns)
+                return;
+            owner.engine.selectRack(r);
+            owner.setPatch(r, owner.patchOf(r) == c ? -1 : c);
+        }
+
+        void hover(juce::Point<int> p)
+        {
+            const int r = p.y / kCellH, c = p.x / kCellW;
+            const bool ok = p.x >= 0 && p.y >= 0 && r < owner.engine.getNumRacks() && c < owner.columns;
+            const int nr = ok ? r : -1, nc = ok ? c : -1;
+            if (nr != hoverRow || nc != hoverCol)
+            {
+                hoverRow = nr;
+                hoverCol = nc;
+                owner.refreshHeaders();
+                repaint();
+            }
+        }
+
+        PatchPanel& owner;
+        int hoverRow = -1, hoverCol = -1;
+    };
+
+    struct RowHeader : juce::Component
+    {
+        explicit RowHeader(PatchPanel& o) : owner(o) {}
+
+        void paint(juce::Graphics& g) override
+        {
+            const int viewY = owner.view.getViewPositionY();
+            const int sel = owner.engine.getSelectedRack();
+            for (int r = 0; r < owner.engine.getNumRacks(); ++r)
+            {
+                const int y = r * kCellH - viewY;
+                if (y + kCellH < 0 || y > getHeight()) continue;
+
+                auto cell = juce::Rectangle<float>(0.0f, (float) y, (float) getWidth() - 4.0f, (float) kCellH).reduced(1.0f);
+                g.setColour(r == sel ? Theme::row().brighter(0.12f) : Theme::row());
+                g.fillRoundedRectangle(cell, 4.0f);
+                if (r == owner.grid.hoverRow)
+                {
+                    g.setColour(Theme::accent().withAlpha(0.2f));
+                    g.fillRoundedRectangle(cell, 4.0f);
+                }
+
+                const auto name = owner.engine.getRackName(r);
+                g.setColour(Theme::tint(name));
+                g.fillRoundedRectangle(cell.getX() + 4.0f, cell.getY() + 5.0f, 4.0f, cell.getHeight() - 10.0f, 2.0f);
+                g.setColour(r == sel ? Theme::text() : Theme::muted());
+                g.setFont(juce::FontOptions(12.0f, r == sel ? juce::Font::bold : juce::Font::plain));
+                g.drawText(juce::String(r + 1) + "  " + name, cell.withTrimmedLeft(14.0f).toNearestInt(),
+                           juce::Justification::centredLeft, true);
+
+                const int p = owner.patchOf(r);
+                g.setColour(Theme::muted());
+                g.setFont(juce::FontOptions(10.5f));
+                g.drawText(p >= 0 ? pairName(p) : "-", cell.toNearestInt().withTrimmedRight(6),
+                           juce::Justification::centredRight);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            const int r = (e.y + owner.view.getViewPositionY()) / kCellH;
+            if (r >= 0 && r < owner.engine.getNumRacks())
+                owner.engine.selectRack(r);
+        }
+
+        PatchPanel& owner;
+    };
+
+    struct ColHeader : juce::Component
+    {
+        explicit ColHeader(PatchPanel& o) : owner(o) {}
+
+        void paint(juce::Graphics& g) override
+        {
+            const int viewX = owner.view.getViewPositionX();
+            const int patched = owner.engine.getNumRacks() > 0 ? owner.patchOf(owner.engine.getSelectedRack()) : -1;
+            for (int c = 0; c < owner.columns; ++c)
+            {
+                const int x = c * kCellW - viewX;
+                if (x + kCellW < 0 || x > getWidth()) continue;
+
+                auto cell = juce::Rectangle<float>((float) x, 0.0f, (float) kCellW, (float) getHeight() - 4.0f).reduced(1.0f, 0.0f);
+                g.setColour(c == patched ? Theme::accent().withAlpha(0.35f) : Theme::row());
+                g.fillRoundedRectangle(cell, 4.0f);
+                if (c == owner.grid.hoverCol)
+                {
+                    g.setColour(Theme::accent().withAlpha(0.2f));
+                    g.fillRoundedRectangle(cell, 4.0f);
+                }
+
+                g.setColour(Theme::muted());
+                g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+                g.drawText(juce::String(c * 2 + 1), cell.withHeight(cell.getHeight() * 0.5f).toNearestInt(),
+                           juce::Justification::centred);
+                g.drawText(juce::String(c * 2 + 2),
+                           cell.withTrimmedTop(cell.getHeight() * 0.5f).toNearestInt(), juce::Justification::centred);
+            }
+        }
+
+        PatchPanel& owner;
+    };
+
+    void refreshHeaders() { rowHeader.repaint(); colHeader.repaint(); }
+
+    RackEngine& engine;
+    bool outputs = false;
+    int columns = 0;
+    ScrollView view;
+    Grid grid;
+    RowHeader rowHeader;
+    ColHeader colHeader;
+    juce::TextButton inBtn, outBtn, defaultBtn, clearBtn;
+};
+
 // Full-size view of the shows library: every saved show in a list, with actions on the right.
 class ShowsPanel : public juce::Component, private juce::ListBoxModel
 {
@@ -1288,7 +1595,7 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -1298,6 +1605,9 @@ public:
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
         inputsBtn.setButtonText("Inputs");
+        patchBtn.setButtonText("Patch");
+        patchBtn.setTooltip("Patch bay: connect input sockets to racks and racks to output sockets");
+        patchBtn.onClick = [this] { togglePatch(); };
         eqBtn.setButtonText("EQ");
         eqBtn.setTooltip("Open the built-in channel EQ of the selected rack");
         addRackBtn.setButtonText("Add rack");
@@ -1446,6 +1756,7 @@ public:
         addChildComponent(eqPanel);
         addChildComponent(inputsPanel);
         addChildComponent(showsPanel);
+        addChildComponent(patchPanel);
         showsPanel.onOpen = [this](const juce::File& f) { openShow(f, true); };
         showsPanel.onSave = [this] { saveCurrentShow(); };
         showsPanel.onSaveAs = [this] { saveShowAs(); };
@@ -1590,7 +1901,7 @@ public:
 
     void paintOverChildren(juce::Graphics& g) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
             return;
 
         // Magnifier icon inside the search box
@@ -1632,7 +1943,7 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &saveBtn, &patchBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
@@ -1644,6 +1955,8 @@ public:
         statusBar = r.removeFromBottom(20);
         r.removeFromBottom(8);
 
+        patchPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
+                             r.getBottom() - hotStrip.getY());
         showsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
                              r.getBottom() - hotStrip.getY());
         inputsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
@@ -1732,7 +2045,7 @@ public:
     // Drag and drop: plugins (from the list or hot strip) and rack rows
     bool isInterestedInDragSource(const SourceDetails& d) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
             return false;
         const auto s = d.description.toString();
         return s.startsWith("add:") || s.startsWith("move:");
@@ -1764,7 +2077,7 @@ public:
     // Dropping plugin files (.vst3 / .component) onto the window scans and adds them.
     bool isInterestedInFileDrag(const juce::StringArray& files) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
             return false;
         for (auto& f : files)
             if (isPluginFile(f)) return true;
@@ -2327,11 +2640,33 @@ private:
         repaint();
     }
 
+    void togglePatch()
+    {
+        const bool show = ! patchPanel.isVisible();
+        if (show)
+        {
+            if (editorHost.isVisible())
+                closeInlineEditor(true);
+            if (inputsPanel.isVisible())
+                toggleInputs();
+            if (showsPanel.isVisible())
+                toggleShows();
+            patchPanel.refresh();
+        }
+        patchPanel.setVisible(show);
+        if (show)
+            patchPanel.toFront(false);
+        patchBtn.setButtonText(show ? "Rack" : "Patch");
+        repaint();
+    }
+
     void toggleShows()
     {
         const bool show = ! showsPanel.isVisible();
         if (show)
         {
+            if (patchPanel.isVisible())
+                togglePatch();
             if (editorHost.isVisible())
                 closeInlineEditor(true);
             if (inputsPanel.isVisible())
@@ -2350,6 +2685,8 @@ private:
         const bool show = ! inputsPanel.isVisible();
         if (show)
         {
+            if (patchPanel.isVisible())
+                togglePatch();
             if (showsPanel.isVisible())
                 toggleShows();
             if (editorHost.isVisible())
@@ -2778,6 +3115,8 @@ private:
         }
         if (inputsPanel.isVisible())
             inputsPanel.sync();
+        if (patchPanel.isVisible())
+            patchPanel.refresh();
 
         bypassAllBtn.setButtonText(engine.areAllBypassed() ? "Enable all" : "Bypass all");
         bypassAllBtn.setEnabled(n > 0);
@@ -3146,12 +3485,13 @@ private:
     juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
     EqPanel eqPanel { engine };
     InputsPanel inputsPanel { engine };
     ShowsPanel showsPanel { getShowsDir() };
+    PatchPanel patchPanel { engine };
     int checking = 0;
     juce::String checkingName;
     juce::File lockFile = getDataDir().getChildFile("session.lock");
