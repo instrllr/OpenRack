@@ -1091,8 +1091,8 @@ public:
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
         hotBtn.setButtonText("Hot plugins");
-        saveBtn.setButtonText("Save rack");
-        loadBtn.setButtonText("Load rack");
+        saveBtn.setButtonText("Save show");
+        loadBtn.setButtonText("Shows");
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
         inputsBtn.setButtonText("Inputs");
@@ -1107,8 +1107,8 @@ public:
         scanBtn.setTooltip("Find the plugins installed on this computer");
         audioBtn.setTooltip("Choose the audio device, sample rate and buffer size");
         hotBtn.setTooltip("Quick-grab menu: your pinned and most-used plugins");
-        saveBtn.setTooltip("Save this rack to a file");
-        loadBtn.setTooltip("Load a rack from a file");
+        saveBtn.setTooltip("Save the whole show (all racks, patching, snapshots) to your shows library");
+        loadBtn.setTooltip("Open a saved show from your library");
         bypassAllBtn.setTooltip("Switch every plugin in the rack off or on");
         clearBtn.setTooltip("Remove every plugin from the rack");
 
@@ -2671,37 +2671,194 @@ private:
         o.launchAsync();
     }
 
+    //--------------------------------------------------------------------------
+    // Shows library: .oshow files kept in the app's data folder.
+    static juce::File getShowsDir()
+    {
+        auto d = getDataDir().getChildFile("Shows");
+        d.createDirectory();
+        return d;
+    }
+
+    static juce::Array<juce::File> listShows()
+    {
+        juce::Array<juce::File> out;
+        for (auto& f : getShowsDir().findChildFiles(juce::File::findFiles, false, "*.oshow;*.orack"))
+            out.add(f);
+        struct ByName
+        {
+            static int compareElements(const juce::File& a, const juce::File& b)
+            {
+                return a.getFileNameWithoutExtension().compareNatural(b.getFileNameWithoutExtension());
+            }
+        };
+        ByName sorter;
+        out.sort(sorter);
+        return out;
+    }
+
+    void updateShowTitle()
+    {
+        rackTitle.setTooltip(currentShow.isNotEmpty() ? "Show: " + currentShow : juce::String());
+        loadBtn.setButtonText(currentShow.isNotEmpty() ? "Shows: " + currentShow.substring(0, 10) : "Shows");
+    }
+
+    void saveShowTo(const juce::File& f, bool inLibrary)
+    {
+        if (engine.saveRack(f))
+        {
+            if (inLibrary)
+            {
+                currentShow = f.getFileNameWithoutExtension();
+                updateShowTitle();
+            }
+        }
+        else
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Save show",
+                                                   "Could not write " + f.getFullPathName());
+    }
+
+    void saveShowAs()
+    {
+        juce::Component::SafePointer<MainComponent> safe(this);
+        promptText("Save show", "Name for this show:", currentShow, [safe](const juce::String& typed)
+        {
+            if (safe == nullptr) return;
+            const auto name = juce::File::createLegalFileName(typed.trim());
+            if (name.isEmpty()) return;
+
+            const auto f = getShowsDir().getChildFile(name + ".oshow");
+            if (! f.existsAsFile())
+            {
+                safe->saveShowTo(f, true);
+                return;
+            }
+
+            juce::AlertWindow::showAsync(
+                juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::QuestionIcon)
+                    .withTitle("Replace show?")
+                    .withMessage("A show called \"" + name + "\" already exists. Replace it?")
+                    .withButton("Replace").withButton("Cancel"),
+                [safe, f](int r)
+                {
+                    if (r == 1 && safe != nullptr) safe->saveShowTo(f, true);
+                });
+        });
+    }
+
     void saveRack()
     {
-        chooser = std::make_unique<juce::FileChooser>("Save rack", juce::File(), "*.orack");
-        chooser->launchAsync(juce::FileBrowserComponent::saveMode
-                                 | juce::FileBrowserComponent::canSelectFiles
-                                 | juce::FileBrowserComponent::warnAboutOverwriting,
-                             [this](const juce::FileChooser& fc)
-                             {
-                                 auto f = fc.getResult();
-                                 if (f != juce::File())
-                                     engine.saveRack(f.withFileExtension("orack"));
-                             });
+        juce::PopupMenu m;
+        const auto current = currentShow.isNotEmpty() ? getShowsDir().getChildFile(currentShow + ".oshow")
+                                                      : juce::File();
+        m.addItem(1, currentShow.isNotEmpty() ? "Save \"" + currentShow + "\"" : "Save", true);
+        m.addItem(2, "Save as new show...");
+        m.addSeparator();
+        m.addItem(3, "Export to a file...");
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(saveBtn), [safe, current](int r)
+        {
+            if (safe == nullptr || r <= 0) return;
+            if (r == 1)
+            {
+                if (current != juce::File()) safe->saveShowTo(current, true);
+                else                         safe->saveShowAs();
+            }
+            else if (r == 2) safe->saveShowAs();
+            else if (r == 3)
+            {
+                safe->chooser = std::make_unique<juce::FileChooser>("Export show", juce::File(), "*.oshow");
+                safe->chooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                               | juce::FileBrowserComponent::canSelectFiles
+                                               | juce::FileBrowserComponent::warnAboutOverwriting,
+                                           [safe](const juce::FileChooser& fc)
+                                           {
+                                               auto f = fc.getResult();
+                                               if (safe != nullptr && f != juce::File())
+                                                   safe->saveShowTo(f.withFileExtension("oshow"), false);
+                                           });
+            }
+        });
+    }
+
+    void openShow(const juce::File& f, bool inLibrary)
+    {
+        juce::Component::SafePointer<MainComponent> safe(this);
+        engine.loadRack(f, [safe, f, inLibrary](const juce::String& err)
+        {
+            if (safe == nullptr) return;
+            safe->syncFaders();
+            if (err.isNotEmpty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Open show", err);
+                return;
+            }
+            safe->currentShow = inLibrary ? f.getFileNameWithoutExtension() : juce::String();
+            safe->updateShowTitle();
+        });
     }
 
     void loadRack()
     {
-        chooser = std::make_unique<juce::FileChooser>("Load rack", juce::File(), "*.orack");
-        chooser->launchAsync(juce::FileBrowserComponent::openMode
-                                 | juce::FileBrowserComponent::canSelectFiles,
-                             [this](const juce::FileChooser& fc)
-                             {
-                                 auto f = fc.getResult();
-                                 if (f == juce::File()) return;
-                                 engine.loadRack(f, [this](const juce::String& err)
-                                 {
-                                     syncFaders();
-                                     if (err.isNotEmpty())
-                                         juce::AlertWindow::showMessageBoxAsync(
-                                             juce::MessageBoxIconType::WarningIcon, "Load rack", err);
-                                 });
-                             });
+        const auto shows = listShows();
+
+        juce::PopupMenu m, del;
+        if (shows.isEmpty())
+            m.addItem(-1, "No saved shows yet - use Save show", false);
+        for (int i = 0; i < shows.size(); ++i)
+        {
+            const auto name = shows[i].getFileNameWithoutExtension();
+            m.addItem(1000 + i, name, true, name == currentShow);
+            del.addItem(2000 + i, name);
+        }
+        m.addSeparator();
+        m.addItem(1, "Open from a file...");
+        if (shows.size() > 0)
+            m.addSubMenu("Delete a show", del);
+        m.addItem(2, "Show shows folder");
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(loadBtn), [safe, shows](int r)
+        {
+            if (safe == nullptr || r <= 0) return;
+
+            if (r >= 2000 && r - 2000 < shows.size())
+            {
+                const auto f = shows[r - 2000];
+                juce::AlertWindow::showAsync(
+                    juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::WarningIcon)
+                        .withTitle("Delete show?")
+                        .withMessage("Delete \"" + f.getFileNameWithoutExtension() + "\" permanently?")
+                        .withButton("Delete").withButton("Cancel"),
+                    [safe, f](int b)
+                    {
+                        if (b != 1 || safe == nullptr) return;
+                        f.deleteFile();
+                        if (safe->currentShow == f.getFileNameWithoutExtension())
+                        {
+                            safe->currentShow = {};
+                            safe->updateShowTitle();
+                        }
+                    });
+            }
+            else if (r >= 1000 && r - 1000 < shows.size())
+                safe->openShow(shows[r - 1000], true);
+            else if (r == 2)
+                getShowsDir().revealToUser();
+            else if (r == 1)
+            {
+                safe->chooser = std::make_unique<juce::FileChooser>("Open show", getShowsDir(), "*.oshow;*.orack");
+                safe->chooser->launchAsync(juce::FileBrowserComponent::openMode
+                                               | juce::FileBrowserComponent::canSelectFiles,
+                                           [safe](const juce::FileChooser& fc)
+                                           {
+                                               auto f = fc.getResult();
+                                               if (safe != nullptr && f != juce::File())
+                                                   safe->openShow(f, false);
+                                           });
+            }
+        });
     }
 
     //--------------------------------------------------------------------------
@@ -2726,6 +2883,7 @@ private:
     juce::OwnedArray<SnapButton> tabButtons;
     std::vector<int> tabIds;
     juce::String tabSignature;
+    juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
     juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn;
@@ -2736,7 +2894,7 @@ private:
     int checking = 0;
     juce::String checkingName;
     juce::File lockFile = getDataDir().getChildFile("session.lock");
-    juce::File autosaveFile = getDataDir().getChildFile("autosave.orack");
+    juce::File autosaveFile = getDataDir().getChildFile("autosave.oshow");
     bool autosaveArmed = false, autosaveDirty = false;
     juce::Slider rackFader, masterFader;
     int stripDividerX = 0;
