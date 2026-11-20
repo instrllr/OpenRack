@@ -1831,6 +1831,8 @@ public:
         addAndMakeVisible(tabViewport);
 
         racksList.setModel(&racksModel);
+        racksList.setMultipleSelectionEnabled(true);
+        racksList.setTooltip("Ctrl/Cmd-click or Shift-click to select several racks, then right-click to group or color them all");
         racksList.setRowHeight(RackRow::kHeight);
         addAndMakeVisible(racksList);
 
@@ -3149,19 +3151,42 @@ private:
                  { "White", 0xffe8ebf2 } };
     }
 
+    // The racks currently selected in the list (as rack indices).
+    std::vector<int> selectedRacks() const
+    {
+        std::vector<int> out;
+        const auto rows = racksList.getSelectedRows();
+        for (int i = 0; i < rows.size(); ++i)
+        {
+            const int row = rows[i];
+            if (row >= 0 && row < (int) visibleRacks.size())
+                out.push_back(visibleRacks[(size_t) row]);
+        }
+        return out;
+    }
+
+    // Right-click menu. If the clicked rack is part of a multi-selection the choices apply to all of them.
     void showRackMenu(int rack)
     {
+        auto targets = selectedRacks();
+        if (std::find(targets.begin(), targets.end(), rack) == targets.end())
+            targets = { rack };
+        const bool many = targets.size() > 1;
+
         juce::PopupMenu m;
-        m.addItem(1, "Rename rack...");
+        if (many)
+            m.addSectionHeader(juce::String((int) targets.size()) + " racks selected");
+        else
+            m.addItem(1, "Rename rack...");
 
         juce::PopupMenu groupsMenu;
         const auto current = engine.getRackGroup(rack);
-        groupsMenu.addItem(2, "No group", true, current == 0);
+        groupsMenu.addItem(2, "No group", true, ! many && current == 0);
         for (int i = 0; i < engine.getNumGroups(); ++i)
-            groupsMenu.addItem(100 + i, engine.getGroupName(i), true, engine.getGroupId(i) == current);
+            groupsMenu.addItem(100 + i, engine.getGroupName(i), true, ! many && engine.getGroupId(i) == current);
         groupsMenu.addSeparator();
         groupsMenu.addItem(3, "New group...");
-        m.addSubMenu("Move to group", groupsMenu);
+        m.addSubMenu(many ? "Move all to group" : "Move to group", groupsMenu);
 
         const auto swatches = colourChoices();
         const auto currentColour = engine.getRackColour(rack);
@@ -3172,41 +3197,51 @@ private:
             const auto text = juce::String(juce::CharPointer_UTF8("\xe2\x96\xa0  ")) + sw.name;
             if (sw.argb == 0)
             {
-                colourMenu.addItem(200 + i, "Automatic", true, currentColour == 0);
+                colourMenu.addItem(200 + i, "Automatic", true, ! many && currentColour == 0);
                 groupColourMenu.addItem(300 + i, "Automatic");
             }
             else
             {
-                colourMenu.addColouredItem(200 + i, text, juce::Colour(sw.argb), true, currentColour == sw.argb);
+                colourMenu.addColouredItem(200 + i, text, juce::Colour(sw.argb), true,
+                                           ! many && currentColour == sw.argb);
                 groupColourMenu.addColouredItem(300 + i, text, juce::Colour(sw.argb));
             }
         }
-        m.addSubMenu("Color", colourMenu);
-        if (current != 0)
+        m.addSubMenu(many ? "Color all" : "Color", colourMenu);
+        if (! many && current != 0)
             m.addSubMenu("Color whole group", groupColourMenu);
 
         juce::Component::SafePointer<MainComponent> safe(this);
-        m.showMenuAsync(juce::PopupMenu::Options(), [safe, rack, current](int r)
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, rack, current, targets](int r)
         {
             if (safe == nullptr || r <= 0) return;
+            auto& eng = safe->engine;
             const auto choices = colourChoices();
+
             if (r >= 200 && r < 200 + (int) choices.size())
             {
-                safe->engine.setRackColour(rack, choices[(size_t) (r - 200)].argb);
+                for (int t : targets) eng.setRackColour(t, choices[(size_t) (r - 200)].argb);
                 return;
             }
             if (r >= 300 && r < 300 + (int) choices.size())
             {
-                for (int i = 0; i < safe->engine.getNumRacks(); ++i)
-                    if (safe->engine.getRackGroup(i) == current)
-                        safe->engine.setRackColour(i, choices[(size_t) (r - 300)].argb);
+                for (int i = 0; i < eng.getNumRacks(); ++i)
+                    if (eng.getRackGroup(i) == current)
+                        eng.setRackColour(i, choices[(size_t) (r - 300)].argb);
                 return;
             }
-            if (r == 1)      safe->renameRack(rack);
-            else if (r == 2) { safe->engine.setRackGroup(rack, 0); }
-            else if (r == 3) safe->newGroup(rack);
-            else if (r >= 100 && r - 100 < safe->engine.getNumGroups())
-                safe->engine.setRackGroup(rack, safe->engine.getGroupId(r - 100));
+            if (r == 1)
+                safe->renameRack(rack);
+            else if (r == 2)
+                for (int t : targets) eng.setRackGroup(t, 0);
+            else if (r == 3)
+                safe->newGroup(-1, [safe, targets](juce::uint32 id)
+                {
+                    if (safe == nullptr) return;
+                    for (int t : targets) safe->engine.setRackGroup(t, id);
+                });
+            else if (r >= 100 && r - 100 < eng.getNumGroups())
+                for (int t : targets) eng.setRackGroup(t, eng.getGroupId(r - 100));
         });
     }
 
@@ -3363,6 +3398,7 @@ private:
                                  engine.getRackColour(sel) != 0 ? juce::Colour(engine.getRackColour(sel)) : Theme::text());
         rackStripLabel.setTooltip("Rack " + juce::String(sel + 1) + ": " + engine.getRackName(sel));
 
+        const auto keepSelected = selectedRacks();
         rebuildVisibleRacks();
         rebuildTabs();
         racksTitle.setText(activeGroup < 0 ? "RACKS  -  " + juce::String(engine.getNumRacks())
@@ -3371,7 +3407,16 @@ private:
                            juce::dontSendNotification);
         racksList.updateContent();
         const auto it = std::find(visibleRacks.begin(), visibleRacks.end(), sel);
-        if (it != visibleRacks.end())
+        if (keepSelected.size() > 1 && std::find(keepSelected.begin(), keepSelected.end(), sel) != keepSelected.end())
+        {
+            // keep a multi-selection alive across changes (e.g. after moving racks to a group)
+            juce::SparseSet<int> rows;
+            for (size_t row = 0; row < visibleRacks.size(); ++row)
+                if (std::find(keepSelected.begin(), keepSelected.end(), visibleRacks[row]) != keepSelected.end())
+                    rows.addRange({ (int) row, (int) row + 1 });
+            racksList.setSelectedRows(rows, juce::dontSendNotification);
+        }
+        else if (it != visibleRacks.end())
             racksList.selectRow((int) (it - visibleRacks.begin()), true, true);
         else
             racksList.deselectAllRows();
