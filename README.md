@@ -40,6 +40,7 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 5. Use Edit / Bypass / ^ / v / X on each rack row, or drag the row to reorder.
 
 ## Roadmap
+- Direct input-to-output patching (a third patch-bay view that routes sockets straight through without a rack), for setups like Waves SoundGrid
 - MIDI routing and instrument plugins
 - MIDI / OSC control of snapshots, faders and bypass
 - Parallel chains and per-slot gain
