@@ -1122,10 +1122,19 @@ public:
         inputsBtn.onClick = [this] { toggleInputs(); };
         eqBtn.onClick = [this] { toggleEq(); };
         engine.onDirty = [this] { autosaveDirty = true; };
-        addRackBtn.onClick = [this] { engine.addRack(); };
+        addRackBtn.onClick = [this]
+        {
+            if (engine.addRack() && activeGroup >= 0)
+                engine.setRackGroup(engine.getNumRacks() - 1, (juce::uint32) activeGroup);
+        };
         removeRackBtn.onClick = [this] { confirmRemoveRack(); };
 
         // Racks sidebar and patching
+        tabViewport.setViewedComponent(&tabContent, false);
+        tabViewport.setScrollBarsShown(false, true);
+        tabViewport.setScrollBarThickness(6);
+        addAndMakeVisible(tabViewport);
+
         racksList.setModel(&racksModel);
         racksList.setRowHeight(RackRow::kHeight);
         addAndMakeVisible(racksList);
@@ -1478,7 +1487,10 @@ public:
         mixerPanel = racksCol.removeFromBottom(juce::jmin(260, racksCol.getHeight() / 2));
         racksCol.removeFromBottom(12);
         racksPanel = racksCol;
-        racksList.setBounds(racksCol.reduced(6));
+        auto racksInner = racksCol.reduced(6);
+        tabViewport.setBounds(racksInner.removeFromTop(36));
+        racksInner.removeFromTop(2);
+        racksList.setBounds(racksInner);
 
         auto strips = mixerPanel.reduced(10, 8);
         auto rackStrip = strips.removeFromLeft(strips.getWidth() * 58 / 100);
@@ -1609,10 +1621,11 @@ private:
         MainComponent& owner;
     };
 
+    // The racks sidebar shows the racks of the active tab; `row` is a position in that list.
     struct RacksModel : juce::ListBoxModel
     {
         explicit RacksModel(MainComponent& o) : owner(o) {}
-        int getNumRows() override { return owner.engine.getNumRacks(); }
+        int getNumRows() override { return (int) owner.visibleRacks.size(); }
         void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool selected) override
         {
             auto r = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
@@ -1637,15 +1650,24 @@ private:
                 delete existing;
                 r = new RackRow(owner.engine);
             }
-            r->setRow(row);
+            r->setRow(owner.visibleRacks[(size_t) row]);
             return r;
         }
         void selectedRowsChanged(int lastRow) override
         {
-            if (lastRow >= 0)
-                owner.engine.selectRack(lastRow);
+            if (lastRow >= 0 && lastRow < getNumRows())
+                owner.engine.selectRack(owner.visibleRacks[(size_t) lastRow]);
         }
-        void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { owner.renameRack(row); }
+        void listBoxItemClicked(int row, const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu() && row >= 0 && row < getNumRows())
+                owner.showRackMenu(owner.visibleRacks[(size_t) row]);
+        }
+        void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
+        {
+            if (row >= 0 && row < getNumRows())
+                owner.renameRack(owner.visibleRacks[(size_t) row]);
+        }
         MainComponent& owner;
     };
 
@@ -2238,26 +2260,181 @@ private:
         fill(outCombo, nOut, curOut);
     }
 
-    void renameRack(int row)
+    // A small "type a name" dialog.
+    void promptText(const juce::String& title, const juce::String& message, const juce::String& initial,
+                    std::function<void(const juce::String&)> onOk)
     {
-        if (row < 0 || row >= engine.getNumRacks())
-            return;
-
-        auto* w = new juce::AlertWindow("Rename rack", "Name for this rack:",
-                                        juce::MessageBoxIconType::NoIcon, this);
-        w->addTextEditor("name", engine.getRackName(row));
+        auto* w = new juce::AlertWindow(title, message, juce::MessageBoxIconType::NoIcon, this);
+        w->addTextEditor("name", initial);
         w->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
         w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
 
         juce::Component::SafePointer<juce::AlertWindow> window(w);
         juce::Component::SafePointer<MainComponent> safe(this);
         w->enterModalState(true,
-                           juce::ModalCallbackFunction::create([safe, window, row](int result)
+                           juce::ModalCallbackFunction::create([safe, window, onOk](int result)
                            {
                                if (result == 1 && safe != nullptr && window != nullptr)
-                                   safe->engine.renameRack(row, window->getTextEditorContents("name"));
+                                   onOk(window->getTextEditorContents("name"));
                            }),
                            true);
+    }
+
+    void renameRack(int rack)
+    {
+        if (rack < 0 || rack >= engine.getNumRacks())
+            return;
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        promptText("Rename rack", "Name for this rack:", engine.getRackName(rack),
+                   [safe, rack](const juce::String& name)
+                   {
+                       if (safe != nullptr) safe->engine.renameRack(rack, name);
+                   });
+    }
+
+    //--------------------------------------------------------------------------
+    // Groups (tabs above the racks list)
+    void newGroup(int moveRack)
+    {
+        juce::Component::SafePointer<MainComponent> safe(this);
+        promptText("New group", "Name for the new group (it becomes a tab):", {},
+                   [safe, moveRack](const juce::String& name)
+                   {
+                       if (safe == nullptr) return;
+                       const auto id = safe->engine.addGroup(name);
+                       if (moveRack >= 0)
+                           safe->engine.setRackGroup(moveRack, id);
+                       safe->activeGroup = (int) id;
+                       safe->refresh();
+                   });
+    }
+
+    void showGroupMenu(juce::uint32 id)
+    {
+        juce::PopupMenu m;
+        m.addItem(1, "Rename group...");
+        m.addItem(2, "Delete group (racks are kept)");
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, id](int r)
+        {
+            if (safe == nullptr) return;
+            if (r == 1)
+            {
+                juce::String current;
+                for (int i = 0; i < safe->engine.getNumGroups(); ++i)
+                    if (safe->engine.getGroupId(i) == id) current = safe->engine.getGroupName(i);
+                safe->promptText("Rename group", "Name for this group:", current,
+                                 [safe, id](const juce::String& name)
+                                 {
+                                     if (safe != nullptr) safe->engine.renameGroup(id, name);
+                                 });
+            }
+            else if (r == 2)
+            {
+                safe->engine.removeGroup(id);
+                if (safe->activeGroup == (int) id) safe->activeGroup = -1;
+                safe->refresh();
+            }
+        });
+    }
+
+    void showRackMenu(int rack)
+    {
+        juce::PopupMenu m;
+        m.addItem(1, "Rename rack...");
+
+        juce::PopupMenu groupsMenu;
+        const auto current = engine.getRackGroup(rack);
+        groupsMenu.addItem(2, "No group", true, current == 0);
+        for (int i = 0; i < engine.getNumGroups(); ++i)
+            groupsMenu.addItem(100 + i, engine.getGroupName(i), true, engine.getGroupId(i) == current);
+        groupsMenu.addSeparator();
+        groupsMenu.addItem(3, "New group...");
+        m.addSubMenu("Move to group", groupsMenu);
+
+        juce::Component::SafePointer<MainComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options(), [safe, rack](int r)
+        {
+            if (safe == nullptr || r <= 0) return;
+            if (r == 1)      safe->renameRack(rack);
+            else if (r == 2) { safe->engine.setRackGroup(rack, 0); }
+            else if (r == 3) safe->newGroup(rack);
+            else if (r >= 100 && r - 100 < safe->engine.getNumGroups())
+                safe->engine.setRackGroup(rack, safe->engine.getGroupId(r - 100));
+        });
+    }
+
+    // One tab per group plus "All" and "+" (rebuilt only when the list of groups changes).
+    void rebuildTabs()
+    {
+        juce::String sig;
+        for (int i = 0; i < engine.getNumGroups(); ++i)
+            sig += juce::String(engine.getGroupId(i)) + ":" + engine.getGroupName(i) + "|";
+
+        if (sig != tabSignature)
+        {
+            tabSignature = sig;
+            tabButtons.clear();
+
+            auto add = [this](const juce::String& text, int groupId, bool isNew)
+            {
+                auto* b = tabButtons.add(new SnapButton());
+                b->setButtonText(text);
+                b->setColour(juce::TextButton::buttonOnColourId, Theme::accent());
+                b->setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+                b->setSize(measureText(text, 13.0f) + 28, 26);
+
+                if (isNew)
+                {
+                    b->setTooltip("Add a group (a new tab)");
+                    b->onClick = [this] { newGroup(-1); };
+                }
+                else
+                {
+                    b->setTooltip(groupId < 0 ? "Show every rack"
+                                              : "Racks in " + text + ". Right-click to rename or delete.");
+                    b->onClick = [this, groupId] { activeGroup = groupId; refresh(); };
+                    if (groupId >= 0)
+                        b->onRightClick = [this, groupId] { showGroupMenu((juce::uint32) groupId); };
+                }
+                tabContent.addAndMakeVisible(b);
+                tabIds.push_back(isNew ? -2 : groupId);
+            };
+
+            tabIds.clear();
+            add("All", -1, false);
+            for (int i = 0; i < engine.getNumGroups(); ++i)
+                add(engine.getGroupName(i), (int) engine.getGroupId(i), false);
+            add("+", -1, true);
+
+            int x = 0;
+            for (auto* b : tabButtons)
+            {
+                b->setTopLeftPosition(x, 0);
+                x += b->getWidth() + 4;
+            }
+            tabContent.setSize(juce::jmax(x, 1), 28);
+        }
+
+        for (int i = 0; i < tabButtons.size(); ++i)
+            tabButtons[i]->setToggleState(tabIds[(size_t) i] == activeGroup, juce::dontSendNotification);
+    }
+
+    void rebuildVisibleRacks()
+    {
+        // A deleted group falls back to showing everything.
+        bool found = activeGroup < 0;
+        for (int i = 0; i < engine.getNumGroups(); ++i)
+            found = found || (int) engine.getGroupId(i) == activeGroup;
+        if (! found)
+            activeGroup = -1;
+
+        visibleRacks.clear();
+        for (int i = 0; i < engine.getNumRacks(); ++i)
+            if (activeGroup < 0 || (int) engine.getRackGroup(i) == activeGroup)
+                visibleRacks.push_back(i);
     }
 
     void confirmRemoveRack()
@@ -2324,11 +2501,21 @@ private:
             title += "  -  latency " + juce::String(lat) + " smp";
         rackTitle.setText(title, juce::dontSendNotification);
 
-        rackStripLabel.setText("RACK " + juce::String(sel + 1), juce::dontSendNotification);
-        rackStripLabel.setTooltip(engine.getRackName(sel));
-        racksTitle.setText("RACKS  -  " + juce::String(engine.getNumRacks()), juce::dontSendNotification);
+        rackStripLabel.setText(engine.getRackName(sel), juce::dontSendNotification);
+        rackStripLabel.setTooltip("Rack " + juce::String(sel + 1) + ": " + engine.getRackName(sel));
+
+        rebuildVisibleRacks();
+        rebuildTabs();
+        racksTitle.setText(activeGroup < 0 ? "RACKS  -  " + juce::String(engine.getNumRacks())
+                                           : "RACKS  -  " + juce::String((int) visibleRacks.size()) + " of "
+                                                 + juce::String(engine.getNumRacks()),
+                           juce::dontSendNotification);
         racksList.updateContent();
-        racksList.selectRow(sel, true, true);
+        const auto it = std::find(visibleRacks.begin(), visibleRacks.end(), sel);
+        if (it != visibleRacks.end())
+            racksList.selectRow((int) (it - visibleRacks.begin()), true, true);
+        else
+            racksList.deselectAllRows();
         racksList.repaint();
         removeRackBtn.setEnabled(engine.getNumRacks() > 1);
         addRackBtn.setEnabled(engine.getNumRacks() < kMaxRacks);
@@ -2518,6 +2705,13 @@ private:
     std::vector<juce::PluginDescription> filtered;
     int totalEffects = 0;
     juce::ListBox pluginList, rackList, racksList;
+    std::vector<int> visibleRacks;                      // racks shown in the active tab
+    int activeGroup = -1;                               // -1 = "All"
+    juce::Viewport tabViewport;
+    juce::Component tabContent;
+    juce::OwnedArray<SnapButton> tabButtons;
+    std::vector<int> tabIds;
+    juce::String tabSignature;
     juce::TextEditor searchBox;
     juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;

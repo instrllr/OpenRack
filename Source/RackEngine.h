@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <algorithm>
 #include <array>
 #include <map>
 #include <memory>
@@ -370,6 +371,47 @@ public:
         notify();
     }
 
+    //--------------------------------------------------------------------------
+    // Groups: named tabs that racks can be filed under (group id 0 = no group).
+    int getNumGroups() const { return (int) groups.size(); }
+    juce::uint32 getGroupId(int i) const { return groups[(size_t) i].id; }
+    juce::String getGroupName(int i) const { return groups[(size_t) i].name; }
+
+    juce::uint32 addGroup(const juce::String& name)
+    {
+        const auto id = nextGroupId++;
+        groups.push_back({ id, name.trim().isEmpty() ? "Group " + juce::String(id) : name.trim() });
+        notify();
+        return id;
+    }
+
+    void renameGroup(juce::uint32 id, const juce::String& name)
+    {
+        for (auto& g : groups)
+            if (g.id == id && name.trim().isNotEmpty())
+                g.name = name.trim();
+        notify();
+    }
+
+    // Deleting a group keeps its racks; they just become ungrouped.
+    void removeGroup(juce::uint32 id)
+    {
+        for (auto& r : racks)
+            if (r->groupId == id) r->groupId = 0;
+        groups.erase(std::remove_if(groups.begin(), groups.end(), [id](const Group& g) { return g.id == id; }),
+                     groups.end());
+        notify();
+    }
+
+    juce::uint32 getRackGroup(int i) const { return valid(i) ? racks[(size_t) i]->groupId : 0; }
+
+    void setRackGroup(int i, juce::uint32 groupId)
+    {
+        if (! valid(i)) return;
+        racks[(size_t) i]->groupId = groupExists(groupId) ? groupId : 0;
+        notify();
+    }
+
     juce::String getRackName(int i) const { return valid(i) ? racks[(size_t) i]->name : juce::String(); }
     int getRackNumSlots(int i) const { return valid(i) ? (int) racks[(size_t) i]->slots.size() : 0; }
     int getRackInputPair(int i) const { return valid(i) ? racks[(size_t) i]->inPair : -1; }
@@ -628,6 +670,7 @@ public:
 
         if (same)
         {
+            applyGroupsXml(*xml);
             for (size_t k = 0; k < rackEls.size(); ++k)
             {
                 auto& r = *racks[k];
@@ -674,10 +717,19 @@ public:
         root->setAttribute("sel", selected);
         root->setAttribute("master", (double) masterGain.load());
 
+        auto* ge = root->createNewChildElement("Groups");
+        for (auto& g : groups)
+        {
+            auto* e = ge->createNewChildElement("Group");
+            e->setAttribute("id", (int) g.id);
+            e->setAttribute("name", g.name);
+        }
+
         for (auto& r : racks)
         {
             auto* re = root->createNewChildElement("Rack");
             re->setAttribute("name", r->name);
+            re->setAttribute("group", (int) r->groupId);
             re->setAttribute("in", r->inPair);
             re->setAttribute("out", r->outPair);
             re->setAttribute("gain", (double) faderOf(*r).gain.load());
@@ -770,10 +822,17 @@ private:
     {
         juce::uint32 id = 0;
         juce::String name;
+        juce::uint32 groupId = 0;
         int inPair = -1, outPair = -1;
         bool mute = false, solo = false;
         juce::AudioProcessorGraph::Node::Ptr inNode, eqNode, faderNode;
         std::vector<Slot> slots;
+    };
+
+    struct Group
+    {
+        juce::uint32 id;
+        juce::String name;
     };
 
     struct PendingSlot
@@ -808,6 +867,27 @@ private:
     };
 
     //--------------------------------------------------------------------------
+    bool groupExists(juce::uint32 id) const
+    {
+        for (auto& g : groups)
+            if (g.id == id) return true;
+        return false;
+    }
+
+    void applyGroupsXml(const juce::XmlElement& session)
+    {
+        groups.clear();
+        nextGroupId = 1;
+        if (auto* ge = session.getChildByName("Groups"))
+            for (auto* e : ge->getChildWithTagNameIterator("Group"))
+            {
+                const auto id = (juce::uint32) e->getIntAttribute("id", 0);
+                if (id == 0 || groupExists(id)) continue;
+                groups.push_back({ id, e->getStringAttribute("name", "Group") });
+                nextGroupId = juce::jmax(nextGroupId, id + 1);
+            }
+    }
+
     bool valid(int i) const { return i >= 0 && i < (int) racks.size(); }
     Rack& cur() { return *racks[(size_t) juce::jlimit(0, (int) racks.size() - 1, selected)]; }
     const Rack& cur() const { return *racks[(size_t) juce::jlimit(0, (int) racks.size() - 1, selected)]; }
@@ -868,6 +948,8 @@ private:
     void applyRackSettings(Rack& r, const juce::XmlElement& e)
     {
         r.name = e.getStringAttribute("name", r.name);
+        const auto gid = (juce::uint32) e.getIntAttribute("group", 0);
+        r.groupId = groupExists(gid) ? gid : 0;
         r.inPair = e.getIntAttribute("in", -1);
         r.outPair = e.getIntAttribute("out", -1);
         r.mute = e.getBoolAttribute("mute");
@@ -988,6 +1070,8 @@ private:
 
         while (! racks.empty())
             destroyRack(0);
+
+        applyGroupsXml(*session);
 
         auto pending = std::make_shared<std::vector<PendingSlot>>();
 
@@ -1154,6 +1238,8 @@ private:
     std::unique_ptr<DeviceCallback> deviceCallback;
 
     std::vector<std::unique_ptr<Rack>> racks;
+    std::vector<Group> groups;
+    juce::uint32 nextGroupId = 1;
     int selected = 0;
     juce::uint32 nextRackId = 1;
     unsigned int loadGeneration = 0;
