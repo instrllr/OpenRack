@@ -1131,7 +1131,7 @@ public:
 
         // Racks sidebar and patching
         tabViewport.setViewedComponent(&tabContent, false);
-        tabViewport.setScrollBarsShown(false, true);
+        tabViewport.setScrollBarsShown(true, false);
         tabViewport.setScrollBarThickness(6);
         addAndMakeVisible(tabViewport);
 
@@ -1436,6 +1436,10 @@ public:
         inputsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
                               r.getBottom() - hotStrip.getY());
 
+        tabViewport.setBounds(r.removeFromLeft(108));
+        r.removeFromLeft(12);
+        layoutTabs();
+
         auto racksCol = r.removeFromRight(juce::jlimit(200, 260, r.getWidth() / 4));
         r.removeFromRight(16);
 
@@ -1487,10 +1491,7 @@ public:
         mixerPanel = racksCol.removeFromBottom(juce::jmin(260, racksCol.getHeight() / 2));
         racksCol.removeFromBottom(12);
         racksPanel = racksCol;
-        auto racksInner = racksCol.reduced(6);
-        tabViewport.setBounds(racksInner.removeFromTop(36));
-        racksInner.removeFromTop(2);
-        racksList.setBounds(racksInner);
+        racksList.setBounds(racksCol.reduced(6));
 
         auto strips = mixerPanel.reduced(10, 8);
         auto rackStrip = strips.removeFromLeft(strips.getWidth() * 58 / 100);
@@ -2373,8 +2374,9 @@ private:
         for (int i = 0; i < engine.getNumGroups(); ++i)
             sig += juce::String(engine.getGroupId(i)) + ":" + engine.getGroupName(i) + "|";
 
-        if (sig != tabSignature)
+        if (! tabsBuilt || sig != tabSignature)
         {
+            tabsBuilt = true;
             tabSignature = sig;
             tabButtons.clear();
 
@@ -2409,17 +2411,29 @@ private:
                 add(engine.getGroupName(i), (int) engine.getGroupId(i), false);
             add("+", -1, true);
 
-            int x = 0;
-            for (auto* b : tabButtons)
-            {
-                b->setTopLeftPosition(x, 0);
-                x += b->getWidth() + 4;
-            }
-            tabContent.setSize(juce::jmax(x, 1), 28);
+            layoutTabs();
         }
 
         for (int i = 0; i < tabButtons.size(); ++i)
             tabButtons[i]->setToggleState(tabIds[(size_t) i] == activeGroup, juce::dontSendNotification);
+    }
+
+    // Vertical stack of tabs, anchored to the bottom-left of the window.
+    void layoutTabs()
+    {
+        const int w = juce::jmax(40, tabViewport.getWidth() - 8);
+        const int h = 30, gap = 4;
+        const int total = tabButtons.size() * (h + gap);
+        const int contentH = juce::jmax(total, tabViewport.getHeight());
+        tabContent.setSize(w + 8, contentH);
+
+        int y = contentH - total;
+        for (auto* b : tabButtons)
+        {
+            b->setBounds(0, y, w, h);
+            y += h + gap;
+        }
+        tabViewport.setViewPosition(0, contentH);       // keep the bottom (newest tabs) in view
     }
 
     void rebuildVisibleRacks()
@@ -2712,6 +2726,7 @@ private:
     juce::OwnedArray<SnapButton> tabButtons;
     std::vector<int> tabIds;
     juce::String tabSignature;
+    bool tabsBuilt = false;
     juce::TextEditor searchBox;
     juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
