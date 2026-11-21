@@ -1781,12 +1781,11 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn, &groupsBtn, &midiBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn, &groupsBtn, &midiBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
         hotBtn.setButtonText("Hot plugins");
-        saveBtn.setButtonText("Save show");
         loadBtn.setButtonText("Shows");
         bypassAllBtn.setButtonText("Bypass all");
         clearBtn.setButtonText("Clear rack");
@@ -1811,15 +1810,13 @@ public:
         scanBtn.setTooltip("Find the plugins installed on this computer");
         audioBtn.setTooltip("Choose the audio device, sample rate and buffer size");
         hotBtn.setTooltip("Quick-grab menu: your pinned and most-used plugins");
-        saveBtn.setTooltip("Save the whole show (all racks, patching, snapshots) to your shows library");
-        loadBtn.setTooltip("Browse your saved shows");
+        loadBtn.setTooltip("Your saved shows: open, save, rename, delete, import and export");
         bypassAllBtn.setTooltip("Switch every plugin in the rack off or on");
         clearBtn.setTooltip("Remove every plugin from the rack");
 
         scanBtn.onClick = [this] { showScanner(); };
         audioBtn.onClick = [this] { showAudioSettings(); };
         hotBtn.onClick = [this] { showHotMenu(); };
-        saveBtn.onClick = [this] { saveRack(); };
         loadBtn.onClick = [this] { toggleShows(); };
         bypassAllBtn.onClick = [this] { engine.setAllBypassed(! engine.areAllBypassed()); };
         clearBtn.onClick = [this] { confirmClear(); };
@@ -2162,7 +2159,7 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &patchBtn, &midiBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &patchBtn, &midiBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
@@ -3718,42 +3715,6 @@ private:
         });
     }
 
-    void saveRack()
-    {
-        juce::PopupMenu m;
-        const auto current = currentShow.isNotEmpty() ? getShowsDir().getChildFile(currentShow + ".oshow")
-                                                      : juce::File();
-        m.addItem(1, currentShow.isNotEmpty() ? "Save \"" + currentShow + "\"" : "Save", true);
-        m.addItem(2, "Save as new show...");
-        m.addSeparator();
-        m.addItem(3, "Export to a file...");
-
-        juce::Component::SafePointer<MainComponent> safe(this);
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(saveBtn), [safe, current](int r)
-        {
-            if (safe == nullptr || r <= 0) return;
-            if (r == 1)
-            {
-                if (current != juce::File()) safe->saveShowTo(current, true);
-                else                         safe->saveShowAs();
-            }
-            else if (r == 2) safe->saveShowAs();
-            else if (r == 3)
-            {
-                safe->chooser = std::make_unique<juce::FileChooser>("Export show", juce::File(), "*.oshow");
-                safe->chooser->launchAsync(juce::FileBrowserComponent::saveMode
-                                               | juce::FileBrowserComponent::canSelectFiles
-                                               | juce::FileBrowserComponent::warnAboutOverwriting,
-                                           [safe](const juce::FileChooser& fc)
-                                           {
-                                               auto f = fc.getResult();
-                                               if (safe != nullptr && f != juce::File())
-                                                   safe->saveShowTo(f.withFileExtension("oshow"), false);
-                                           });
-            }
-        });
-    }
-
     void openShow(const juce::File& f, bool inLibrary)
     {
         juce::Component::SafePointer<MainComponent> safe(this);
@@ -3882,7 +3843,7 @@ private:
     juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn, midiBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn, midiBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
     EqPanel eqPanel { engine };
