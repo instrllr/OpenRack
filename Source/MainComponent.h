@@ -563,7 +563,7 @@ public:
         g.setFont(juce::FontOptions(12.0f));
         g.drawText("Inputs your DAW has switched on are lit; choose each rack's In / Out pair in the rack header. "
                    "FL Studio: send a mixer track to an OpenRack input. Logic Pro: input 2 is the side-chain.",
-                   16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
+                   descArea.withTrimmedLeft(8), juce::Justification::centredLeft, true);
     }
 
     void resized() override
@@ -649,7 +649,7 @@ public:
         g.drawText(direct ? "DIRECT I/O  -  64 stereo inputs straight to 64 stereo outputs, no rack in between"
                           : outputs ? "OUTPUT PATCH  -  64 racks to 64 stereo outputs (128 channels)"
                                     : "INPUT PATCH  -  64 stereo inputs (128 channels) to 64 racks",
-                   16, 8, 620, 20, juce::Justification::centredLeft);
+                   16, 8, juce::jmax(100, inBtn.getX() - 32), 20, juce::Justification::centredLeft, true);
         g.setFont(juce::FontOptions(12.0f));
         const int avail = availableCols();
         const juce::String note = direct
@@ -675,6 +675,7 @@ public:
         top.removeFromRight(4);
         inBtn.setBounds(top.removeFromRight(110).reduced(0, 8));
 
+        descArea = r.removeFromTop(22);
         auto body = r.withTrimmedTop(2);
         colHeader.setBounds(body.getX() + kRowHeaderW, body.getY(), body.getWidth() - kRowHeaderW, kColHeaderH);
         rowHeader.setBounds(body.getX(), body.getY() + kColHeaderH, kRowHeaderW, body.getHeight() - kColHeaderH);
@@ -940,6 +941,7 @@ private:
     void refreshHeaders() { rowHeader.repaint(); colHeader.repaint(); }
 
     RackEngine& engine;
+    juce::Rectangle<int> descArea;
     bool outputs = false, direct = false;
     int columns = 0;
     ScrollView view;
