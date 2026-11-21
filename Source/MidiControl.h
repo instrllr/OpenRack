@@ -346,7 +346,7 @@ private:
 
         if (m.isMidiClock())
         {
-            if (! followClock.load())
+            if (true)   // MIDI clock following was removed (tap tempo only)
                 return;
             juce::MidiMessage copy(m);
             if (copy.getTimeStamp() == 0.0)
@@ -512,19 +512,12 @@ private:
                 return analog(actionKey(a), value, gainToNorm(host.midiGetMaster()),
                               [this](float n) { host.midiSetMaster(normToGain(n)); });
 
+            // Tempo is tap-only from MIDI: continuous tempo moves would make delay and reverb
+            // times jump during a show. Old bindings of the removed kinds are simply ignored.
             case Kind::tempo:
-                return analog(actionKey(a), value,
-                              (float) ((host.midiGetTempo() - tempo::kMin) / (tempo::kMax - tempo::kMin)),
-                              [this](float n) { host.midiSetTempo(tempo::kMin + (double) n * (tempo::kMax - tempo::kMin)); });
-
             case Kind::tempoDown:
-                if (! pressed) return false;
-                host.midiSetTempo(host.midiGetTempo() - 1.0);
-                return true;
             case Kind::tempoUp:
-                if (! pressed) return false;
-                host.midiSetTempo(host.midiGetTempo() + 1.0);
-                return true;
+                return false;
             case Kind::tempoTap:
                 if (! pressed) return false;
                 host.midiTapTempo();
@@ -711,7 +704,7 @@ private:
         pickup = xml->getBoolAttribute("pickup", true);
         faderFeedback = xml->getBoolAttribute("faderFb", false);
         ledFeedback = xml->getBoolAttribute("ledFb", true);
-        followClock.store(xml->getBoolAttribute("clockFollow", false));
+        followClock.store(false);
 
         bindings.clear();
         for (auto* e : xml->getChildWithTagNameIterator("Bind"))
