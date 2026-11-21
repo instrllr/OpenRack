@@ -8,6 +8,7 @@
 #include "Sandbox.h"
 #include "ChannelEq.h"
 #include "MidiControl.h"
+#include "RemotePlugin.h"
 
 static constexpr int kMaxInputBuses = 64;                    // stereo inputs/outputs a DAW can patch
 static constexpr int kMaxRacks = 64;                         // stereo racks, like SuperRack Performer
@@ -131,6 +132,18 @@ public:
     std::array<InputBus, kMaxInputBuses> inputBuses;
 
     std::function<void()> onChanged;            // racks or chains changed (message thread)
+    std::function<void(const juce::String&)> onMessage;     // status messages (plugin crashed / restarted ...)
+
+    // Out-of-process hosting (standalone app): run newly loaded plugins in their own helper process.
+    bool getIsolatePlugins() const { return isolatePlugins.load(); }
+
+    void setIsolatePlugins(bool on)
+    {
+        isolatePlugins.store(on);
+        auto f = getDataDirectory().getChildFile("isolate.flag");
+        f.getParentDirectory().createDirectory();
+        f.replaceWithText(on ? "1" : "0");
+    }
     MidiController midi { *this, getDataDirectory().getChildFile("midi.xml") };   // hardware control surfaces
 
     std::function<void()> onDirty;              // a setting changed that should be saved (light-weight)
@@ -166,6 +179,9 @@ public:
             deviceManager.initialise(kGraphChannels, kGraphChannels, nullptr, true);
             deviceManager.addAudioCallback(deviceCallback.get());
         }
+
+        if (ownsDevice)
+            isolatePlugins.store(getDataDirectory().getChildFile("isolate.flag").loadFileAsString().trim() == "1");
 
         // Open the saved MIDI devices once the message loop is running.
         std::weak_ptr<int> alive = aliveToken;
@@ -643,6 +659,13 @@ public:
         auto node = cur().slots[(size_t) i].node;
         auto uid = node->nodeID.uid;
 
+        if (auto* rp = dynamic_cast<remote::RemotePlugin*>(node->getProcessor()))
+            if (rp->getState() == remote::RemotePlugin::State::failed)
+            {
+                rp->restart();      // it gave up after repeated crashes; try once more on request
+                return;
+            }
+
         if (windows.count(uid) != 0)
         {
             windows[uid]->toFront(true);
@@ -1095,50 +1118,103 @@ private:
             return;
         }
 
-        const auto marker = safety.getMarkerFile();
-        safety.markLoading(pluginId);
-
         std::weak_ptr<int> alive = aliveToken;
 
-        formatManager.createPluginInstanceAsync(
-            d, sr, bs,
-            [this, alive, d, done, state, bypassed, marker, rackId, insertAt]
-            (std::unique_ptr<juce::AudioPluginInstance> inst, const juce::String& err)
+        // Puts a loaded plugin (in-process or in a helper process) into the rack.
+        auto finish = [this, alive, d, done, state, bypassed, rackId, insertAt]
+                      (std::unique_ptr<juce::AudioProcessor> proc)
+        {
+            if (alive.expired())
+                return;     // the engine was destroyed while this plugin was loading
+
+            auto* rack = findRack(rackId);
+            if (rack == nullptr)
             {
-                marker.deleteFile();      // the plugin got through loading
+                if (done) done("That rack was removed while the plugin was loading.");
+                return;
+            }
 
+            if (state.getSize() > 0)
+                proc->setStateInformation(state.getData(), (int) state.getSize());
+
+            auto node = graph.addNode(std::move(proc));
+            node->setBypassed(bypassed);
+
+            const int pos = (insertAt >= 0 && insertAt < (int) rack->slots.size())
+                                ? insertAt : (int) rack->slots.size();
+            Slot slot;
+            slot.node = node;
+            slot.desc = d;
+            rack->slots.insert(rack->slots.begin() + pos, slot);
+
+            rebuildConnections();
+            notify();
+            if (done) done({});
+        };
+
+        auto loadInProcess = [this, alive, d, done, sr, bs, pluginId, finish]
+        {
+            const auto marker = safety.getMarkerFile();
+            safety.markLoading(pluginId);
+
+            formatManager.createPluginInstanceAsync(
+                d, sr, bs,
+                [alive, done, marker, finish](std::unique_ptr<juce::AudioPluginInstance> inst, const juce::String& err)
+                {
+                    marker.deleteFile();      // the plugin got through loading
+
+                    if (alive.expired())
+                        return;
+
+                    if (inst == nullptr)
+                    {
+                        if (done) done(err.isEmpty() ? "Could not load plugin" : err);
+                        return;
+                    }
+                    finish(std::move(inst));
+                });
+        };
+
+        if (! (ownsDevice && isolatePlugins.load()))
+        {
+            loadInProcess();
+            return;
+        }
+
+        // Out-of-process: the plugin loads in a helper process, so a crash cannot take OpenRack down.
+        remote::RemotePlugin::launch(
+            d, sr, bs,
+            [this, alive, d, done, pluginId, finish, loadInProcess]
+            (std::unique_ptr<remote::RemotePlugin> p, const juce::String& err, bool cleanFailure)
+            {
                 if (alive.expired())
-                    return;     // the engine was destroyed while this plugin was loading
+                    return;
 
-                if (inst == nullptr)
+                if (p == nullptr)
                 {
-                    if (done) done(err.isEmpty() ? "Could not load plugin" : err);
+                    if (cleanFailure)
+                    {
+                        if (onMessage)
+                            onMessage(d.name + " cannot run in its own process (" + err + "). Loading it normally.");
+                        loadInProcess();
+                    }
+                    else
+                    {
+                        safety.block(pluginId);
+                        if (done)
+                            done(d.name + " crashed while loading and has been blocked. It did not affect OpenRack.");
+                    }
                     return;
                 }
 
-                auto* rack = findRack(rackId);
-                if (rack == nullptr)
+                p->onEvent = [this, alive](const juce::String& m)
                 {
-                    if (done) done("That rack was removed while the plugin was loading.");
-                    return;
-                }
-
-                if (state.getSize() > 0)
-                    inst->setStateInformation(state.getData(), (int) state.getSize());
-
-                auto node = graph.addNode(std::move(inst));
-                node->setBypassed(bypassed);
-
-                const int pos = (insertAt >= 0 && insertAt < (int) rack->slots.size())
-                                    ? insertAt : (int) rack->slots.size();
-                Slot slot;
-                slot.node = node;
-                slot.desc = d;
-                rack->slots.insert(rack->slots.begin() + pos, slot);
-
-                rebuildConnections();
-                notify();
-                if (done) done({});
+                    if (alive.expired()) return;
+                    if (onMessage) onMessage(m);
+                    notify();
+                };
+                p->onLatencyChanged = [this, alive] { if (! alive.expired()) notifyLatency(); };
+                finish(std::move(p));
             });
     }
 
@@ -1318,6 +1394,7 @@ private:
     std::atomic<float> masterGain { 1.0f }, masterPeakL { 0.0f }, masterPeakR { 0.0f };
     std::atomic<int> numInputPairs { kMaxInputBuses }, numOutputPairs { kMaxInputBuses };
     std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
+    std::atomic<bool> isolatePlugins { false };
 
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorGraph::Node::Ptr audioIn, audioOut;

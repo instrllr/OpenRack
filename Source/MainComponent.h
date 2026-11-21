@@ -170,6 +170,9 @@ public:
             if (lat > 0)
                 details += "  -  " + juce::String(lat) + " smp latency";
 
+            if (auto* rp = dynamic_cast<remote::RemotePlugin*>(s.node->getProcessor()))
+                details += "  -  " + rp->getStatusText();
+
             bypass.setToggleState(s.node->isBypassed(), juce::dontSendNotification);
         }
         repaint();
@@ -1947,6 +1950,20 @@ public:
         addChildComponent(showsPanel);
         addChildComponent(patchPanel);
         addChildComponent(midiPanel);
+
+        isolateBtn.setButtonText("Isolate plugins");
+        isolateBtn.setColour(juce::ToggleButton::textColourId, Theme::text());
+        isolateBtn.setToggleState(engine.getIsolatePlugins(), juce::dontSendNotification);
+        isolateBtn.setTooltip("Run each newly loaded plugin in its own process, so a crashing plugin cannot take "
+                              "OpenRack down (it restarts automatically). Experimental. Standalone app only.");
+        isolateBtn.onClick = [this] { engine.setIsolatePlugins(isolateBtn.getToggleState()); };
+        isolateBtn.setVisible(engine.ownsAudioDevice());
+        addChildComponent(isolateBtn);
+        engine.onMessage = [this](const juce::String& m)
+        {
+            flashText = m;
+            flashUntil = juce::Time::getMillisecondCounter() + 9000;
+        };
         engine.midi.onChanged = [this] { midiPanel.refresh(); };
         engine.midi.onApplied = [this]
         {
@@ -1998,6 +2015,7 @@ public:
         engine.onBeforeSlotRemoved = nullptr;
         editorHost.clear();
         engine.onChanged = nullptr;
+        engine.onMessage = nullptr;
         engine.midi.onChanged = nullptr;
         engine.midi.onApplied = nullptr;
         engine.knownPlugins.removeChangeListener(this);
@@ -2173,7 +2191,11 @@ public:
         auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
         r.removeFromLeft(16);
 
-        pluginTitle.setBounds(left.removeFromTop(24));
+        {
+            auto titleRow = left.removeFromTop(24);
+            isolateBtn.setBounds(titleRow.removeFromRight(180));
+            pluginTitle.setBounds(titleRow);
+        }
         searchBox.setBounds(left.removeFromTop(32));
         left.removeFromTop(8);
         pluginPanel = left;
@@ -3534,6 +3556,9 @@ private:
         if (checking > 0)
             s = "Checking " + checkingName + " in a separate process before loading it...";
 
+        if (flashUntil != 0 && (juce::int32) (juce::Time::getMillisecondCounter() - flashUntil) < 0)
+            s = flashText;
+
         if (autosaveArmed && autosaveDirty && engine.ownsAudioDevice())
         {
             autosaveDirty = false;
@@ -3875,6 +3900,9 @@ private:
     juce::String patchSignature;
     juce::Rectangle<int> pluginPanel, rackPanel, racksPanel, mixerPanel, statusBar, hotStrip;
     juce::String statusText;
+    juce::String flashText;
+    juce::uint32 flashUntil = 0;
+    juce::ToggleButton isolateBtn;
     std::vector<std::unique_ptr<HotChip>> hotChips;
     juce::String hotSignature;
     int dropIndex = -1;

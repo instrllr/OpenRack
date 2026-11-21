@@ -138,6 +138,39 @@ jobs:
           & ./pv/pluginval.exe --strictness-level 5 --validate-in-process --timeout-ms 120000 $vst3.FullName 2>&1 | Tee-Object -FilePath pluginval.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Out-of-process hosting self-test: loads OpenRack's own VST3 through a helper process,
+      # pushes audio through it, then kills the helper and checks that it recovers.
+      - name: Out-of-process host self-test (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb
+          BIN=$(find build/OpenRack_artefacts -type f -name OpenRack | head -1)
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          timeout 200 xvfb-run -a "$BIN" --hosttest "$VST3" 2>&1 | tee hosttest.txt
+          grep -q "HOSTTEST: PASS" hosttest.txt
+
+      - name: Out-of-process host self-test (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          BIN=$(find build/OpenRack_artefacts -maxdepth 5 -type f -path "*OpenRack.app/Contents/MacOS/OpenRack" | head -1)
+          VST3=$(find build/OpenRackPlugin_artefacts -maxdepth 4 -type d -name OpenRack.vst3 | head -1)
+          perl -e 'alarm 200; exec @ARGV' "$BIN" --hosttest "$VST3" 2>&1 | tee hosttest.txt
+          grep -q "HOSTTEST: PASS" hosttest.txt
+
+      - name: Out-of-process host self-test (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build/OpenRack_artefacts -Recurse -Filter OpenRack.exe | Select-Object -First 1
+          $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--hosttest", "`"$($vst3.FullName)`"" -RedirectStandardOutput hosttest.txt -PassThru -NoNewWindow
+          if (-not $p.WaitForExit(200000)) { $p.Kill(); Get-Content hosttest.txt; exit 1 }
+          Get-Content hosttest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:

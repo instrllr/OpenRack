@@ -21,6 +21,7 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 - **Shows library**: **Save show** stores the whole show (all racks, patching, EQ, snapshots, plugin state) as a `.oshow` in the app's shows library; the **Shows** button opens a full-size library view to open, rename, delete, import or export shows (old `.orack` files still open). The show is also saved inside your DAW project
 - **64 stereo input and output buses** (VST3): switch them on in your DAW, trim each input from the **Inputs** view, and patch racks to them. FL Studio can send mixer tracks to any input; Logic's AU exposes the main input plus its one side-chain and a single output
 - **Snapshots**: 8 stored sessions (all racks, patching and faders). Same plugins = instant recall; otherwise plugins reload. They are also the plugin's 8 programs, so a DAW can automate them
+- **Isolated plugins (experimental, standalone app)**: tick **Isolate plugins** and every plugin you load afterwards runs in its own helper process. If a plugin crashes or hangs OpenRack keeps running, the slot passes audio through, and the plugin is restarted automatically with its last state
 - **Crash protection**: new plugins are test-loaded in a separate process first (standalone app), plugins that crash while loading get blocked, and the standalone app offers to restore your last rack after an unexpected exit
 
 ## Build
@@ -45,7 +46,7 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 - MIDI routing and instrument plugins
 - MIDI / OSC control of snapshots, faders and bypass
 - Parallel chains and per-slot gain
-- Full out-of-process plugin hosting (today's protection covers loading, not a crash while audio is running)
+- Out-of-process hosting for the VST3 / AU plugin versions (today it is standalone-app only) and per-rack instead of per-plugin processes
 
 # DISCLAIMER
 
