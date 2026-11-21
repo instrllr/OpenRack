@@ -59,12 +59,12 @@ namespace remote
                 return;
 
             if (! pipe.openExisting(args[1]))
-                return fail("Could not open the audio pipe");
+                { fail("Could not open the audio pipe"); return; }
 
             juce::PluginDescription d;
             auto xml = juce::parseXML(juce::File(args[2]));
             if (xml == nullptr || ! d.loadFromXml(*xml))
-                return fail("Could not read the plugin description");
+                { fail("Could not read the plugin description"); return; }
 
             sampleRate = args[4].getDoubleValue();
             blockSize = juce::jmax(16, args[5].getIntValue());
@@ -75,7 +75,7 @@ namespace remote
             juce::String error;
             plugin = formats.createPluginInstance(d, sampleRate, blockSize, error);
             if (plugin == nullptr)
-                return fail(error.isEmpty() ? "Could not load the plugin" : error);
+                { fail(error.isEmpty() ? "Could not load the plugin" : error); return; }
 
             // One stereo bus in and out; any side-chain or extra buses are switched off.
             using Set = juce::AudioChannelSet;
@@ -85,7 +85,7 @@ namespace remote
             for (int i = 0; i < layout.outputBuses.size(); ++i)
                 layout.outputBuses.getReference(i) = (i == 0) ? Set::stereo() : Set::disabled();
             if (! plugin->setBusesLayout(layout))
-                return fail(d.name + " does not support a plain stereo layout");
+                { fail(d.name + " does not support a plain stereo layout"); return; }
 
             plugin->prepareToPlay(sampleRate, blockSize);
             sh->latency.store(plugin->getLatencySamples());

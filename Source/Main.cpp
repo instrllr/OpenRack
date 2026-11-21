@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "RemotePlugin.h"
+#include <cstdio>
 
 // Self-test used by CI: loads a plugin through the out-of-process host, pushes audio through it,
 // reads and writes its state, then kills the helper and checks that it comes back.
@@ -16,7 +17,10 @@ public:
                 f->findAllTypesForFile(found, pluginPath);
 
         if (found.isEmpty())
-            return finish(false, "no plugin found in " + pluginPath);
+        {
+            finish(false, "no plugin found in " + pluginPath);
+            return;
+        }
 
         std::printf("HOSTTEST: launching %s in a helper process\n", found[0]->name.toRawUTF8());
         started = juce::Time::getMillisecondCounter();
@@ -40,7 +44,8 @@ private:
         std::printf("HOSTTEST: %s - %s\n", ok ? "PASS" : "FAIL", message.toRawUTF8());
         std::fflush(stdout);
         plugin.reset();
-        juce::JUCEApplicationBase::setApplicationReturnValue(ok ? 0 : 1);
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->setApplicationReturnValue(ok ? 0 : 1);
         juce::JUCEApplicationBase::quit();
     }
 
