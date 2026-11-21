@@ -4,6 +4,76 @@
 #include "Theme.h"
 
 //==============================================================================
+// Small "MIDI" lamp: flashes green when MIDI arrives, rings in the accent colour when a message
+// triggered one of your bindings (like the activity light on a hardware rack).
+class MidiActivityLed : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit MidiActivityLed(MidiController& c) : midi(c) { startTimerHz(30); }
+
+    std::function<void()> onClick;
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (onClick && contains(e.getPosition()))
+            onClick();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        const float in = decay(now, midi.getLastInTick(), 180.0f);
+        const float act = decay(now, midi.getLastActionTick(), 320.0f);
+        const bool open = midi.getInputName().isNotEmpty();
+
+        auto b = getLocalBounds().toFloat();
+        auto dot = b.removeFromLeft(14.0f).withSizeKeepingCentre(9.0f, 9.0f);
+
+        g.setColour(open ? juce::Colour(0xff2a3a2f) : Theme::muted().withAlpha(0.35f));
+        g.fillEllipse(dot);
+        if (in > 0.0f)
+        {
+            g.setColour(juce::Colour(0xff3ddc84).withAlpha(in));
+            g.fillEllipse(dot);
+        }
+        if (act > 0.0f)
+        {
+            g.setColour(Theme::accent().withAlpha(act));
+            g.drawEllipse(dot.expanded(2.5f), 1.6f);
+        }
+
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+        g.drawText("MIDI", b.withTrimmedLeft(4.0f), juce::Justification::centredLeft);
+    }
+
+private:
+    static float decay(juce::uint32 now, juce::uint32 tick, float ms)
+    {
+        if (tick == 0) return 0.0f;
+        return juce::jlimit(0.0f, 1.0f, 1.0f - (float) (now - tick) / ms);
+    }
+
+    void timerCallback() override
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        const bool active = decay(now, midi.getLastInTick(), 180.0f) > 0.0f
+                         || decay(now, midi.getLastActionTick(), 320.0f) > 0.0f;
+        const auto name = midi.getInputName();
+        const auto tip = name.isEmpty() ? juce::String("No MIDI input selected (click to set one up)")
+                                        : name + (midi.getLastMessage().isNotEmpty() ? "\nLast: " + midi.getLastMessage() : juce::String());
+        if (tip != getTooltip())
+            setTooltip(tip);
+        if (active || wasActive)
+            repaint();
+        wasActive = active;
+    }
+
+    MidiController& midi;
+    bool wasActive = true;
+};
+
+//==============================================================================
 // Full-size MIDI control view: devices, strips and banks, MIDI learn for every control.
 class MidiPanel : public juce::Component, private juce::ListBoxModel
 {
@@ -16,7 +86,7 @@ public:
 
         for (auto* b : { &inBox, &outBox, &stripsBox })
             addAndMakeVisible(b);
-        for (auto* b : { &pickupBtn, &faderFbBtn, &ledFbBtn })
+        for (auto* b : { &pickupBtn, &faderFbBtn, &ledFbBtn, &followBtn })
         {
             b->setColour(juce::ToggleButton::textColourId, Theme::text());
             addAndMakeVisible(b);
@@ -33,6 +103,8 @@ public:
         faderFbBtn.setTooltip("Send fader positions back to the controller (motorized faders)");
         ledFbBtn.setButtonText("Light button LEDs");
         ledFbBtn.setTooltip("Send mute / solo / snapshot state back to the controller's button LEDs");
+        followBtn.setButtonText("Follow MIDI clock");
+        followBtn.setTooltip("Set the global tempo from MIDI clock sent by your controller, drum machine or DAW");
         rescanBtn.setButtonText("Rescan");
         bankPrev.setButtonText("<");
         bankNext.setButtonText(">");
@@ -77,6 +149,7 @@ public:
         pickupBtn.onClick = [this] { midi.setPickup(pickupBtn.getToggleState()); };
         faderFbBtn.onClick = [this] { midi.setFaderFeedback(faderFbBtn.getToggleState()); };
         ledFbBtn.onClick = [this] { midi.setLedFeedback(ledFbBtn.getToggleState()); };
+        followBtn.onClick = [this] { midi.setFollowClock(followBtn.getToggleState()); };
         rescanBtn.onClick = [this] { refreshDevices(); };
         bankPrev.onClick = [this] { midi.setBank(midi.getBank() - 1); };
         bankNext.onClick = [this] { midi.setBank(midi.getBank() + 1); };
@@ -119,6 +192,7 @@ public:
         pickupBtn.setToggleState(midi.getPickup(), juce::dontSendNotification);
         faderFbBtn.setToggleState(midi.getFaderFeedback(), juce::dontSendNotification);
         ledFbBtn.setToggleState(midi.getLedFeedback(), juce::dontSendNotification);
+        followBtn.setToggleState(midi.getFollowClock(), juce::dontSendNotification);
 
         const int first = midi.getBank() * midi.getStripCount() + 1;
         bankLabel.setText("Bank " + juce::String(midi.getBank() + 1) + " of " + juce::String(midi.getNumBanks())
@@ -180,6 +254,8 @@ public:
         rescanBtn.setBounds(row1.removeFromLeft(80));
         row1.removeFromLeft(20);
         stripsBox.setBounds(row1.removeFromLeft(120));
+        row1.removeFromLeft(16);
+        followBtn.setBounds(row1.removeFromLeft(170).withTrimmedTop(14));
 
         r.removeFromTop(6);
         auto row2 = r.removeFromTop(30);
@@ -229,8 +305,12 @@ private:
         auto header = [this](const juce::String& t) { rows.push_back({ true, t, {} }); };
         auto add = [this](K k, int i) { rows.push_back({ false, {}, { k, i } }); };
 
-        header("MASTER AND BANKS");
+        header("MASTER, TEMPO AND BANKS");
         add(K::master, 0);
+        add(K::tempo, 0);
+        add(K::tempoDown, 0);
+        add(K::tempoUp, 0);
+        add(K::tempoTap, 0);
         add(K::bankDown, 0);
         add(K::bankUp, 0);
 
@@ -251,6 +331,10 @@ private:
         switch (a.kind)
         {
             case K::master:   return "Master fader";
+            case K::tempo:     return "Tempo  (fader / knob, 20-500 BPM)";
+            case K::tempoDown: return "Tempo down  (-1 BPM)";
+            case K::tempoUp:   return "Tempo up  (+1 BPM)";
+            case K::tempoTap:  return "Tap tempo";
             case K::bankDown: return "Bank down  (previous racks)";
             case K::bankUp:   return "Bank up  (next racks)";
             case K::snapshot: return "Snapshot " + juce::String(a.index + 1);
@@ -331,7 +415,7 @@ private:
     juce::Rectangle<int> statusArea;
     juce::ListBox list;
     juce::ComboBox inBox, outBox, stripsBox;
-    juce::ToggleButton pickupBtn, faderFbBtn, ledFbBtn;
+    juce::ToggleButton pickupBtn, faderFbBtn, ledFbBtn, followBtn;
     juce::Label bankLabel;
     juce::TextButton rescanBtn, bankPrev, bankNext, mapFaders, mapMutes, mapSolos, mapSnaps, mackieBtn, clearBtn, stopBtn;
 };

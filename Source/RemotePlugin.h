@@ -38,6 +38,9 @@ namespace remote
         std::atomic<juce::int32> cmd { 0 };
         std::atomic<juce::int32> cmdArg { 0 }, cmdArg2 { 0 };
         std::atomic<juce::int32> cmdResult { 0 };
+        std::atomic<double> bpm { 0.0 };                // host tempo / position for the plugin (0 = none)
+        std::atomic<double> ppq { 0.0 };
+        std::atomic<juce::int64> timeSamples { 0 };
         char error[512] = {};
         alignas(64) float audio[kChannels][kMaxBlock];
     };
@@ -87,6 +90,8 @@ namespace remote
             if (! plugin->setBusesLayout(layout))
                 { fail(d.name + " does not support a plain stereo layout"); return; }
 
+            playHead = std::make_unique<ShmPlayHead>(*sh);
+            plugin->setPlayHead(playHead.get());
             plugin->prepareToPlay(sampleRate, blockSize);
             sh->latency.store(plugin->getLatencySamples());
 
@@ -112,6 +117,34 @@ namespace remote
         bool isOk() const { return running; }
 
     private:
+        // Gives the hosted plugin the tempo OpenRack sends along with every block.
+        struct ShmPlayHead : juce::AudioPlayHead
+        {
+            explicit ShmPlayHead(Shared& s) : shm(s) {}
+
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                const double b = shm.bpm.load(std::memory_order_relaxed);
+                if (b <= 0.0)
+                    return {};
+
+                PositionInfo info;
+                TimeSignature ts;
+                ts.numerator = 4;
+                ts.denominator = 4;
+                const double p = shm.ppq.load(std::memory_order_relaxed);
+                info.setBpm(b);
+                info.setTimeSignature(ts);
+                info.setIsPlaying(true);
+                info.setTimeInSamples(shm.timeSamples.load(std::memory_order_relaxed));
+                info.setPpqPosition(p);
+                info.setPpqPositionOfLastBarStart(std::floor(p / 4.0) * 4.0);
+                return info;
+            }
+
+            Shared& shm;
+        };
+
         void fail(const juce::String& message)
         {
             std::strncpy(sh->error, message.toRawUTF8(), sizeof(sh->error) - 1);
@@ -268,6 +301,7 @@ namespace remote
         juce::File stateFile;
         Shared* sh = nullptr;
         juce::NamedPipe pipe;
+        std::unique_ptr<ShmPlayHead> playHead;
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         std::unique_ptr<EditorWindow> window;
         std::unique_ptr<AudioLoop> loop;
@@ -499,6 +533,19 @@ namespace remote
             for (int c = 0; c < Shared::kChannels; ++c)
                 std::memcpy(sh->audio[c], buffer.getReadPointer(juce::jmin(c, chans - 1)) + pos,
                             (size_t) n * sizeof(float));
+
+            if (auto* ph = getPlayHead())
+            {
+                if (auto pos = ph->getPosition())
+                {
+                    const auto b = pos->getBpm();
+                    const auto q = pos->getPpqPosition();
+                    const auto t = pos->getTimeInSamples();
+                    sh->bpm.store(b.hasValue() ? *b : 0.0, std::memory_order_relaxed);
+                    sh->ppq.store(q.hasValue() ? *q : 0.0, std::memory_order_relaxed);
+                    sh->timeSamples.store(t.hasValue() ? *t : 0, std::memory_order_relaxed);
+                }
+            }
 
             sh->numSamples.store(n, std::memory_order_relaxed);
             const auto seq = sh->requestSeq.load(std::memory_order_relaxed) + 1;

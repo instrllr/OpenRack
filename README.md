@@ -53,3 +53,6 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 This software is vibecoded.
 if this is not your cup of tea, you do not have to use it.
 i am simply making this mostly for myself but it is available to anyone who wants to use this software for their live events and do not want to pay for Waves SuperRack Performer.
+
+- **MIDI activity light** in the status bar (green flash on incoming MIDI, accent ring when a binding fires; click to open MIDI setup).
+- **Global tempo** (20-500 BPM) in the toolbar: tap tempo, MIDI fader/knob or +/- buttons, or follow incoming MIDI clock. Hosted plugins receive it as host tempo (standalone app).

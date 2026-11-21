@@ -9,6 +9,12 @@
 #include <set>
 #include <vector>
 
+namespace tempo
+{
+    constexpr double kMin = 20.0;
+    constexpr double kMax = 500.0;      // highest tempo OpenRack accepts
+}
+
 //==============================================================================
 // What the MIDI controller needs from the rack engine.
 struct MidiHost
@@ -26,6 +32,9 @@ struct MidiHost
     virtual bool midiHasSnapshot(int index) const = 0;
     virtual int midiCurrentSnapshot() const = 0;
     virtual void midiRecallSnapshot(int index) = 0;
+    virtual double midiGetTempo() const = 0;
+    virtual void midiSetTempo(double bpm) = 0;
+    virtual void midiTapTempo() = 0;
 };
 
 //==============================================================================
@@ -37,7 +46,8 @@ class MidiController : private juce::MidiInputCallback,
                        private juce::Timer
 {
 public:
-    enum class Kind { fader = 0, mute = 1, solo = 2, master = 3, bankDown = 4, bankUp = 5, snapshot = 6 };
+    enum class Kind { fader = 0, mute = 1, solo = 2, master = 3, bankDown = 4, bankUp = 5, snapshot = 6,
+                      tempo = 7, tempoDown = 8, tempoUp = 9, tempoTap = 10 };
     enum class SrcType { cc = 0, note = 1, pitchBend = 2 };
 
     struct Action
@@ -126,6 +136,13 @@ public:
         save();
         changed();
     }
+
+    bool getFollowClock() const { return followClock.load(); }
+    void setFollowClock(bool b) { followClock.store(b); clockTimes.clear(); save(); changed(); }
+
+    // Activity, for the MIDI indicator (milliseconds on the Time::getMillisecondCounter clock; 0 = never).
+    juce::uint32 getLastInTick() const { return lastInTick.load(); }
+    juce::uint32 getLastActionTick() const { return lastActionTick.load(); }
 
     bool getPickup() const { return pickup; }
     bool getFaderFeedback() const { return faderFeedback; }
@@ -324,8 +341,29 @@ private:
     // MIDI thread: just queue the message for the message thread.
     void handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& m) override
     {
+        if (m.isActiveSense())
+            return;
+
+        if (m.isMidiClock())
+        {
+            if (! followClock.load())
+                return;
+            juce::MidiMessage copy(m);
+            if (copy.getTimeStamp() == 0.0)
+                copy.setTimeStamp(juce::Time::getMillisecondCounterHiRes() * 0.001);
+            {
+                const juce::ScopedLock sl(lock);
+                if (queue.size() < 2048)
+                    queue.push_back(copy);
+            }
+            triggerAsyncUpdate();
+            return;
+        }
+
         if (! (m.isController() || m.isNoteOnOrOff() || m.isPitchWheel()))
             return;
+
+        lastInTick.store(juce::Time::getMillisecondCounter());
         {
             const juce::ScopedLock sl(lock);
             if (queue.size() < 2048)
@@ -343,8 +381,12 @@ private:
         }
 
         bool applied = false;
+        matched = false;
         for (auto& m : batch)
             applied = handleMessage(m) || applied;
+
+        if (matched)
+            lastActionTick.store(juce::Time::getMillisecondCounter());
 
         changed();
         if (applied && onApplied)
@@ -354,6 +396,9 @@ private:
     // Returns true if a rack value changed.
     bool handleMessage(const juce::MidiMessage& m)
     {
+        if (m.isMidiClock())
+            return handleClock(m.getTimeStamp());
+
         Source s;
         float value = 0.0f;
         bool pressed = false;
@@ -399,9 +444,34 @@ private:
 
         for (auto& b : bindings)
             if (sameSource(b.src, s))
+            {
+                matched = true;
                 return dispatch(b.act, value, pressed);
+            }
 
         return false;
+    }
+
+    // 24 clock ticks per beat: average over two beats and follow the tempo they imply.
+    bool handleClock(double t)
+    {
+        if (! clockTimes.empty() && t - clockTimes.back() > 0.5)
+            clockTimes.clear();
+        clockTimes.push_back(t);
+        while (clockTimes.size() > 49)
+            clockTimes.pop_front();
+        if (clockTimes.size() < 49)
+            return false;
+
+        const double span = clockTimes.back() - clockTimes.front();       // 48 ticks = 2 beats
+        if (span <= 0.0)
+            return false;
+
+        const double bpm = juce::jlimit(tempo::kMin, tempo::kMax, std::round(120.0 / span * 10.0) / 10.0);
+        if (std::abs(bpm - host.midiGetTempo()) < 0.3)
+            return false;
+        host.midiSetTempo(bpm);
+        return true;
     }
 
     void learnFrom(const Source& s, bool pressed)
@@ -435,11 +505,30 @@ private:
             {
                 const int rack = rackFor(a.index);
                 if (rack < 0) return false;
-                return analog(actionKey(a), value, host.midiGetFader(rack),
-                              [this, rack](float g) { host.midiSetFader(rack, g); });
+                return analog(actionKey(a), value, gainToNorm(host.midiGetFader(rack)),
+                              [this, rack](float n) { host.midiSetFader(rack, normToGain(n)); });
             }
             case Kind::master:
-                return analog(actionKey(a), value, host.midiGetMaster(), [this](float g) { host.midiSetMaster(g); });
+                return analog(actionKey(a), value, gainToNorm(host.midiGetMaster()),
+                              [this](float n) { host.midiSetMaster(normToGain(n)); });
+
+            case Kind::tempo:
+                return analog(actionKey(a), value,
+                              (float) ((host.midiGetTempo() - tempo::kMin) / (tempo::kMax - tempo::kMin)),
+                              [this](float n) { host.midiSetTempo(tempo::kMin + (double) n * (tempo::kMax - tempo::kMin)); });
+
+            case Kind::tempoDown:
+                if (! pressed) return false;
+                host.midiSetTempo(host.midiGetTempo() - 1.0);
+                return true;
+            case Kind::tempoUp:
+                if (! pressed) return false;
+                host.midiSetTempo(host.midiGetTempo() + 1.0);
+                return true;
+            case Kind::tempoTap:
+                if (! pressed) return false;
+                host.midiTapTempo();
+                return true;
 
             case Kind::mute:
             {
@@ -471,12 +560,12 @@ private:
 
     // Faders and knobs, with optional soft takeover (the physical control has to reach the
     // current value before it takes over, so a bank change does not make the level jump).
-    bool analog(int key, float value, float currentGain, const std::function<void(float)>& apply)
+    bool analog(int key, float value, float currentNorm, const std::function<void(float)>& apply)
     {
         auto& st = pickupState[key];
         if (pickup && ! st.engaged)
         {
-            const float cur = gainToNorm(currentGain);
+            const float cur = currentNorm;
             const bool closeEnough = std::abs(value - cur) <= 0.02f;
             const bool crossed = st.last >= 0.0f && (st.last - cur) * (value - cur) <= 0.0f;
             st.last = value;
@@ -486,7 +575,7 @@ private:
         st.engaged = true;
         st.last = value;
         lastInput[key] = juce::Time::getMillisecondCounter();
-        apply(normToGain(value));
+        apply(value);
         return true;
     }
 
@@ -507,21 +596,27 @@ private:
 
             switch (b.act.kind)
             {
+                case Kind::tempoDown:
+                case Kind::tempoUp:
+                case Kind::tempoTap:
+                    continue;
                 case Kind::fader:
                 case Kind::master:
+                case Kind::tempo:
                 {
                     if (! faderFeedback) continue;
                     if (now - lastInput[actionKey(b.act)] < 500) continue;      // the user is touching it
-                    float gain;
+                    float n;
                     if (b.act.kind == Kind::master)
-                        gain = host.midiGetMaster();
+                        n = gainToNorm(host.midiGetMaster());
+                    else if (b.act.kind == Kind::tempo)
+                        n = juce::jlimit(0.0f, 1.0f, (float) ((host.midiGetTempo() - tempo::kMin) / (tempo::kMax - tempo::kMin)));
                     else
                     {
                         const int rack = rackFor(b.act.index);
                         if (rack < 0) continue;
-                        gain = host.midiGetFader(rack);
+                        n = gainToNorm(host.midiGetFader(rack));
                     }
-                    const float n = gainToNorm(gain);
                     value = b.src.type == SrcType::pitchBend ? juce::roundToInt(n * 16383.0f)
                                                              : juce::roundToInt(n * 127.0f);
                     break;
@@ -588,6 +683,7 @@ private:
         root.setAttribute("pickup", pickup);
         root.setAttribute("faderFb", faderFeedback);
         root.setAttribute("ledFb", ledFeedback);
+        root.setAttribute("clockFollow", followClock.load());
         for (auto& b : bindings)
         {
             auto* e = root.createNewChildElement("Bind");
@@ -615,12 +711,13 @@ private:
         pickup = xml->getBoolAttribute("pickup", true);
         faderFeedback = xml->getBoolAttribute("faderFb", false);
         ledFeedback = xml->getBoolAttribute("ledFb", true);
+        followClock.store(xml->getBoolAttribute("clockFollow", false));
 
         bindings.clear();
         for (auto* e : xml->getChildWithTagNameIterator("Bind"))
         {
             Binding b;
-            b.act.kind = (Kind) juce::jlimit(0, 6, e->getIntAttribute("kind"));
+            b.act.kind = (Kind) juce::jlimit(0, 10, e->getIntAttribute("kind"));
             b.act.index = e->getIntAttribute("idx");
             b.src.type = (SrcType) juce::jlimit(0, 2, e->getIntAttribute("type"));
             b.src.channel = juce::jlimit(1, 16, e->getIntAttribute("ch", 1));
@@ -641,6 +738,11 @@ private:
     int stripCount = 8;
     int bank = 0;
     bool pickup = true, faderFeedback = false, ledFeedback = true;
+
+    std::atomic<bool> followClock { false };
+    std::atomic<juce::uint32> lastInTick { 0 }, lastActionTick { 0 };
+    bool matched = false;
+    std::deque<double> clockTimes;
 
     std::vector<Binding> bindings;
     std::deque<Action> learnQueue;

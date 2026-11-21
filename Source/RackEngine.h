@@ -74,6 +74,43 @@ private:
 };
 
 //==============================================================================
+// The global tempo the standalone app reports to every hosted plugin (tempo-synced delays, LFOs ...).
+struct TempoPlayHead : juce::AudioPlayHead
+{
+    std::atomic<double> bpm { 120.0 };
+    std::atomic<double> ppq { 0.0 };
+    std::atomic<juce::int64> samples { 0 };
+    std::atomic<double> rate { 44100.0 };
+
+    void advance(int n, double sr)
+    {
+        rate.store(sr);
+        ppq.store(ppq.load() + (double) n / sr * bpm.load() / 60.0);
+        samples.store(samples.load() + n);
+    }
+
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo info;
+        const double p = ppq.load();
+        TimeSignature ts;
+        ts.numerator = 4;
+        ts.denominator = 4;
+
+        info.setBpm(bpm.load());
+        info.setTimeSignature(ts);
+        info.setIsPlaying(true);
+        info.setIsRecording(false);
+        info.setIsLooping(false);
+        info.setTimeInSamples(samples.load());
+        info.setTimeInSeconds((double) samples.load() / juce::jmax(1.0, rate.load()));
+        info.setPpqPosition(p);
+        info.setPpqPositionOfLastBarStart(std::floor(p / 4.0) * 4.0);
+        return info;
+    }
+};
+
+//==============================================================================
 // Floating window that hosts a plugin's editor.
 class PluginWindow : public juce::DocumentWindow
 {
@@ -134,6 +171,36 @@ public:
     std::function<void()> onChanged;            // racks or chains changed (message thread)
     std::function<void(const juce::String&)> onMessage;     // status messages (plugin crashed / restarted ...)
 
+    //--------------------------------------------------------------------------
+    // Global tempo (standalone app): what hosted plugins see as the host tempo. Can be set from
+    // the toolbar, tapped, followed from MIDI clock or driven by a MIDI controller.
+    std::function<void()> onTempoChanged;
+
+    double getTempo() const { return tempoHead.bpm.load(); }
+
+    void setTempo(double bpm)
+    {
+        bpm = std::round(juce::jlimit(tempo::kMin, tempo::kMax, bpm) * 10.0) / 10.0;
+        if (std::abs(bpm - tempoHead.bpm.load()) < 1.0e-6)
+            return;
+        tempoHead.bpm.store(bpm);
+        markDirty();
+        if (onTempoChanged)
+            onTempoChanged();
+    }
+
+    void tapTempo()
+    {
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        if (! taps.empty() && now - taps.back() > 2000.0)
+            taps.clear();
+        taps.push_back(now);
+        while (taps.size() > 6)
+            taps.erase(taps.begin());
+        if (taps.size() >= 2)
+            setTempo(60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)));
+    }
+
     // Out-of-process hosting (standalone app): run newly loaded plugins in their own helper process.
     bool getIsolatePlugins() const { return isolatePlugins.load(); }
 
@@ -179,6 +246,9 @@ public:
             deviceManager.initialise(kGraphChannels, kGraphChannels, nullptr, true);
             deviceManager.addAudioCallback(deviceCallback.get());
         }
+
+        if (ownsDevice)
+            graph.setPlayHead(&tempoHead);
 
         if (ownsDevice)
             isolatePlugins.store(getDataDirectory().getChildFile("isolate.flag").loadFileAsString().trim() == "1");
@@ -242,6 +312,8 @@ public:
                 }
 
             graph.processBlock(work, midi);
+            if (ownsDevice)
+                tempoHead.advance(c, sampleRate);
 
             // Master: one gain for every output, with its own meter (even channels = left, odd = right).
             const float mg = masterGain.load(std::memory_order_relaxed);
@@ -756,6 +828,8 @@ public:
             }
             applyInputsXml(*xml);
             masterGain.store((float) xml->getDoubleAttribute("master", 1.0));
+            if (xml->hasAttribute("tempo"))
+                setTempo(xml->getDoubleAttribute("tempo", 120.0));
             applyMuteSolo();
             rebuildConnections();
             notify();
@@ -782,6 +856,7 @@ public:
         auto root = std::make_unique<juce::XmlElement>("Session");
         root->setAttribute("sel", selected);
         root->setAttribute("master", (double) masterGain.load());
+        root->setAttribute("tempo", getTempo());
 
         auto* de = root->createNewChildElement("Direct");
         for (int i = 0; i < kMaxInputBuses; ++i)
@@ -909,6 +984,9 @@ private:
     bool midiHasSnapshot(int i) const override { return hasSnapshot(i); }
     int midiCurrentSnapshot() const override { return getCurrentSnapshot(); }
     void midiRecallSnapshot(int i) override { recallSnapshot(i); }
+    double midiGetTempo() const override { return getTempo(); }
+    void midiSetTempo(double bpm) override { setTempo(bpm); }
+    void midiTapTempo() override { tapTempo(); }
 
     struct Rack
     {
@@ -1247,6 +1325,8 @@ private:
         selected = juce::jlimit(0, getNumRacks() - 1, session->getIntAttribute("sel", 0));
         applyInputsXml(*session);
         masterGain.store((float) session->getDoubleAttribute("master", 1.0));
+        if (session->hasAttribute("tempo"))
+            setTempo(session->getDoubleAttribute("tempo", 120.0));
         applyMuteSolo();
         rebuildConnections();
         notify();
@@ -1395,6 +1475,8 @@ private:
     std::atomic<int> numInputPairs { kMaxInputBuses }, numOutputPairs { kMaxInputBuses };
     std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
     std::atomic<bool> isolatePlugins { false };
+    TempoPlayHead tempoHead;
+    std::vector<double> taps;
 
     juce::AudioProcessorGraph graph;
     juce::AudioProcessorGraph::Node::Ptr audioIn, audioOut;

@@ -1963,9 +1963,33 @@ public:
             flashText = m;
             flashUntil = juce::Time::getMillisecondCounter() + 9000;
         };
+        addAndMakeVisible(midiLed);
+        midiLed.onClick = [this] { if (! midiPanel.isVisible()) toggleMidi(); };
+
+        tempoLabel.setText("BPM", juce::dontSendNotification);
+        tempoLabel.setColour(juce::Label::textColourId, Theme::muted());
+        tempoLabel.setJustificationType(juce::Justification::centredRight);
+        tempoSlider.setSliderStyle(juce::Slider::IncDecButtons);
+        tempoSlider.setIncDecButtonsMode(juce::Slider::incDecButtonsDraggable_Horizontal);
+        tempoSlider.setRange(tempo::kMin, tempo::kMax, 0.1);
+        tempoSlider.setNumDecimalPlacesToDisplay(1);
+        tempoSlider.setDoubleClickReturnValue(true, 120.0);
+        tempoSlider.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 70, 24);
+        tempoSlider.setTooltip("Global tempo (max 500 BPM). Hosted plugins see this as the host tempo. Double-click resets to 120");
+        tempoSlider.setValue(engine.getTempo(), juce::dontSendNotification);
+        tempoSlider.onValueChange = [this] { engine.setTempo(tempoSlider.getValue()); };
+        tapBtn.setButtonText("TAP");
+        tapBtn.setTooltip("Tap the tempo");
+        tapBtn.onClick = [this] { engine.tapTempo(); };
+        if (engine.ownsAudioDevice())
+            for (auto* c : std::initializer_list<juce::Component*> { &tempoLabel, &tempoSlider, &tapBtn })
+                addAndMakeVisible(c);
+        engine.onTempoChanged = [this] { tempoSlider.setValue(engine.getTempo(), juce::dontSendNotification); };
+
         engine.midi.onChanged = [this] { midiPanel.refresh(); };
         engine.midi.onApplied = [this]
         {
+            tempoSlider.setValue(engine.getTempo(), juce::dontSendNotification);
             syncFaders();
             racksList.repaint();
             engine.markDirty();
@@ -2017,6 +2041,7 @@ public:
         engine.onMessage = nullptr;
         engine.midi.onChanged = nullptr;
         engine.midi.onApplied = nullptr;
+        engine.onTempoChanged = nullptr;
         engine.knownPlugins.removeChangeListener(this);
     }
 
@@ -2112,7 +2137,7 @@ public:
         g.fillEllipse((float) statusBar.getX() + 2.0f, (float) statusBar.getCentreY() - 3.0f, 7.0f, 7.0f);
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText(statusText, statusBar.withTrimmedLeft(18), juce::Justification::centredLeft, true);
+        g.drawText(statusText, statusBar.withTrimmedLeft(18).withTrimmedRight(80), juce::Justification::centredLeft, true);
     }
 
     void paintOverChildren(juce::Graphics& g) override
@@ -2163,12 +2188,22 @@ public:
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
+        if (engine.ownsAudioDevice())
+        {
+            auto t = top.removeFromRight(290);
+            tapBtn.setBounds(t.removeFromRight(56).reduced(2, 4));
+            t.removeFromRight(4);
+            tempoSlider.setBounds(t.removeFromRight(150).reduced(0, 6));
+            tempoLabel.setBounds(t.removeFromRight(40));
+        }
+
         r.removeFromTop(16);
 
         hotStrip = r.removeFromTop(36);
         r.removeFromTop(12);
 
         statusBar = r.removeFromBottom(20);
+        midiLed.setBounds(statusBar.getRight() - 70, statusBar.getY(), 70, statusBar.getHeight());
         r.removeFromBottom(8);
 
         midiPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
@@ -3449,6 +3484,7 @@ private:
     {
         // Keep the faders in step with a rack loaded by the host or from a file.
         syncFaders();
+        tempoSlider.setValue(engine.getTempo(), juce::dontSendNotification);
         rebuildFilter();
         rackList.updateContent();
         rackList.repaint();
@@ -3851,6 +3887,10 @@ private:
     ShowsPanel showsPanel { getShowsDir() };
     PatchPanel patchPanel { engine };
     MidiPanel midiPanel { engine.midi };
+    MidiActivityLed midiLed { engine.midi };
+    juce::Slider tempoSlider;
+    juce::Label tempoLabel;
+    juce::TextButton tapBtn;
     int checking = 0;
     juce::String checkingName;
     juce::File lockFile = getDataDir().getChildFile("session.lock");
