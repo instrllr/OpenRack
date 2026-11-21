@@ -165,7 +165,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Path build/OpenRack_artefacts -Recurse -Filter OpenRack.exe | Select-Object -First 1
-          $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Select-Object -First 1
+          $vst3 = Get-ChildItem -Path build/OpenRackPlugin_artefacts -Recurse -Directory -Filter OpenRack.vst3 | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "--hosttest", "`"$($vst3.FullName)`"" -RedirectStandardOutput hosttest.txt -PassThru -NoNewWindow
           if (-not $p.WaitForExit(200000)) { $p.Kill(); Get-Content hosttest.txt; exit 1 }
           Get-Content hosttest.txt

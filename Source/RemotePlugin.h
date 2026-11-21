@@ -323,6 +323,13 @@ namespace remote
         bool isIsolated() const { return true; }
         int getTotalMisses() const { return totalMisses.load(); }
 
+        juce::String debugInfo() const
+        {
+            return "pipeFailed=" + juce::String((int) pipeFailed.load()) + " hung=" + juce::String((int) hung.load())
+                   + " request=" + juce::String(sh != nullptr ? (int) sh->requestSeq.load() : -1)
+                   + " done=" + juce::String(sh != nullptr ? (int) sh->doneSeq.load() : -1);
+        }
+
         juce::String getStatusText() const
         {
             switch (state)
@@ -498,7 +505,7 @@ namespace remote
             sh->requestSeq.store(seq, std::memory_order_release);
 
             const char token = 1;
-            if (pipe == nullptr || pipe->write(&token, 1, 0) != 1)
+            if (pipe == nullptr || pipe->write(&token, 1, 10) != 1)
             {
                 pipeFailed.store(true);
                 return miss();

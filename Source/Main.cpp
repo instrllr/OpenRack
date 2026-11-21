@@ -99,7 +99,7 @@ private:
                 const float diff = runAudio(300, misses);
                 std::printf("HOSTTEST: audio round trip: max difference %.6f, missed blocks %d\n", diff, misses);
                 if (misses > 5)
-                    return finish(false, "too many missed blocks: " + juce::String(misses));
+                    return finish(false, "too many missed blocks: " + juce::String(misses) + " (" + plugin->debugInfo() + ")");
                 if (diff > 0.01f)
                     return finish(false, "output does not match input");
                 phase = 2;
