@@ -50,6 +50,6 @@ GitHub Actions builds all three platforms and runs auval / pluginval on the plug
 
 # DISCLAIMER
 
-This software is made entirely by vibecoding.
+This software is vibecoded.
 if this is not your cup of tea, you do not have to use it.
 i am simply making this mostly for myself but it is available to anyone who wants to use this software for their live events and do not want to pay for Waves SuperRack Performer.
