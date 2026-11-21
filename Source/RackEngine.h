@@ -7,6 +7,7 @@
 #include <memory>
 #include "Sandbox.h"
 #include "ChannelEq.h"
+#include "MidiControl.h"
 
 static constexpr int kMaxInputBuses = 64;                    // stereo inputs/outputs a DAW can patch
 static constexpr int kMaxRacks = 64;                         // stereo racks, like SuperRack Performer
@@ -106,7 +107,7 @@ private:
 //  - ownsAudioDevice = false: the plugin; pairs are the DAW's input/output buses.
 //
 // The "selected rack" is the one the plugin list, chain view and fader act on.
-class RackEngine
+class RackEngine : private MidiHost
 {
 public:
     struct Slot
@@ -130,6 +131,8 @@ public:
     std::array<InputBus, kMaxInputBuses> inputBuses;
 
     std::function<void()> onChanged;            // racks or chains changed (message thread)
+    MidiController midi { *this, getDataDirectory().getChildFile("midi.xml") };   // hardware control surfaces
+
     std::function<void()> onDirty;              // a setting changed that should be saved (light-weight)
     std::function<void()> onLatencyChanged;     // total latency may have changed
     std::function<void(int)> onOpenEditorRequested;           // plugin mode: show a slot's editor inline
@@ -163,10 +166,15 @@ public:
             deviceManager.initialise(kGraphChannels, kGraphChannels, nullptr, true);
             deviceManager.addAudioCallback(deviceCallback.get());
         }
+
+        // Open the saved MIDI devices once the message loop is running.
+        std::weak_ptr<int> alive = aliveToken;
+        juce::MessageManager::callAsync([this, alive] { if (alive.lock() != nullptr) midi.start(); });
     }
 
     ~RackEngine()
     {
+        midi.stop();
         aliveToken.reset();     // any plugin still loading will notice and give up
         windows.clear();
 
@@ -865,6 +873,20 @@ public:
     }
 
 private:
+    // MidiHost: what the MIDI controller drives.
+    int midiNumRacks() const override { return getNumRacks(); }
+    float midiGetFader(int r) const override { return getRackGain(r); }
+    void midiSetFader(int r, float g) override { setRackGain(r, g); }
+    bool midiGetMute(int r) const override { return isRackMuted(r); }
+    void midiSetMute(int r, bool on) override { setRackMute(r, on); }
+    bool midiGetSolo(int r) const override { return isRackSoloed(r); }
+    void midiSetSolo(int r, bool on) override { setRackSolo(r, on); }
+    float midiGetMaster() const override { return getMasterGain(); }
+    void midiSetMaster(float g) override { setMasterGain(g); }
+    bool midiHasSnapshot(int i) const override { return hasSnapshot(i); }
+    int midiCurrentSnapshot() const override { return getCurrentSnapshot(); }
+    void midiRecallSnapshot(int i) override { recallSnapshot(i); }
+
     struct Rack
     {
         juce::uint32 id = 0;

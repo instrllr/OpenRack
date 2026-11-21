@@ -3,6 +3,7 @@
 #include "RackEngine.h"
 #include "Theme.h"
 #include "HotPlugins.h"
+#include "MidiPanel.h"
 
 static constexpr int kRackRowHeight = 56;
 
@@ -1775,7 +1776,7 @@ public:
             });
         };
 
-        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn, &groupsBtn })
+        for (auto* b : { &scanBtn, &audioBtn, &hotBtn, &saveBtn, &loadBtn, &bypassAllBtn, &clearBtn, &inputsBtn, &addRackBtn, &removeRackBtn, &eqBtn, &patchBtn, &groupsBtn, &midiBtn })
             addAndMakeVisible(b);
         scanBtn.setButtonText("Scan plugins");
         audioBtn.setButtonText("Audio settings");
@@ -1788,6 +1789,9 @@ public:
         groupsBtn.setButtonText("Add racks to group...");
         groupsBtn.setTooltip("Choose which existing racks belong to the open group tab");
         groupsBtn.onClick = [this] { groupsButtonClicked(); };
+        midiBtn.setButtonText("MIDI");
+        midiBtn.setTooltip("Hardware control: MIDI learn, faders, mute / solo, banks and LED feedback");
+        midiBtn.onClick = [this] { toggleMidi(); };
         patchBtn.setButtonText("Patch");
         patchBtn.setTooltip("Patch bay: connect input sockets to racks and racks to output sockets");
         patchBtn.onClick = [this] { togglePatch(); };
@@ -1942,6 +1946,14 @@ public:
         addChildComponent(inputsPanel);
         addChildComponent(showsPanel);
         addChildComponent(patchPanel);
+        addChildComponent(midiPanel);
+        engine.midi.onChanged = [this] { midiPanel.refresh(); };
+        engine.midi.onApplied = [this]
+        {
+            syncFaders();
+            racksList.repaint();
+            engine.markDirty();
+        };
         showsPanel.onOpen = [this](const juce::File& f) { openShow(f, true); };
         showsPanel.onSave = [this] { saveCurrentShow(); };
         showsPanel.onSaveAs = [this] { saveShowAs(); };
@@ -1986,6 +1998,8 @@ public:
         engine.onBeforeSlotRemoved = nullptr;
         editorHost.clear();
         engine.onChanged = nullptr;
+        engine.midi.onChanged = nullptr;
+        engine.midi.onApplied = nullptr;
         engine.knownPlugins.removeChangeListener(this);
     }
 
@@ -2086,7 +2100,7 @@ public:
 
     void paintOverChildren(juce::Graphics& g) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
             return;
 
         // Magnifier icon inside the search box
@@ -2128,7 +2142,7 @@ public:
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
-        for (auto* b : { &loadBtn, &saveBtn, &patchBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
+        for (auto* b : { &loadBtn, &saveBtn, &patchBtn, &midiBtn, &hotBtn, &inputsBtn, &audioBtn, &scanBtn })
             if (b->isVisible())
                 b->setBounds(top.removeFromRight(116).reduced(3, 3));
 
@@ -2140,6 +2154,8 @@ public:
         statusBar = r.removeFromBottom(20);
         r.removeFromBottom(8);
 
+        midiPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
+                            r.getBottom() - hotStrip.getY());
         patchPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
                              r.getBottom() - hotStrip.getY());
         showsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
@@ -2231,7 +2247,7 @@ public:
     // Drag and drop: plugins (from the list or hot strip) and rack rows
     bool isInterestedInDragSource(const SourceDetails& d) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
             return false;
         const auto s = d.description.toString();
         return s.startsWith("add:") || s.startsWith("move:");
@@ -2263,7 +2279,7 @@ public:
     // Dropping plugin files (.vst3 / .component) onto the window scans and adds them.
     bool isInterestedInFileDrag(const juce::StringArray& files) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible())
+        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
             return false;
         for (auto& f : files)
             if (isPluginFile(f)) return true;
@@ -2339,7 +2355,7 @@ private:
     {
         explicit RacksModel(MainComponent& o) : owner(o) {}
         int getNumRows() override { return (int) owner.visibleRacks.size(); }
-        void paintListBoxItem(int, juce::Graphics& g, int w, int h, bool selected) override
+        void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected) override
         {
             auto r = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
             g.setColour(selected ? Theme::row().brighter(0.1f) : Theme::row());
@@ -2348,6 +2364,14 @@ private:
             {
                 g.setColour(Theme::accent());
                 g.drawRoundedRectangle(r.reduced(0.5f), 8.0f, 1.5f);
+            }
+
+            // a thin bar marks the racks the hardware controller currently controls (its active bank)
+            if (row >= 0 && row < (int) owner.visibleRacks.size()
+                && owner.engine.midi.isRackInBank(owner.visibleRacks[(size_t) row]))
+            {
+                g.setColour(juce::Colour(0xff3ddc84));
+                g.fillRoundedRectangle(3.0f, 10.0f, 3.0f, (float) h - 20.0f, 1.5f);
             }
         }
         juce::Component* refreshComponentForRow(int row, bool, juce::Component* existing) override
@@ -2826,6 +2850,26 @@ private:
         repaint();
     }
 
+    void toggleMidi()
+    {
+        const bool show = ! midiPanel.isVisible();
+        if (show)
+        {
+            if (editorHost.isVisible())
+                closeInlineEditor(true);
+            if (inputsPanel.isVisible()) toggleInputs();
+            if (showsPanel.isVisible()) toggleShows();
+            if (patchPanel.isVisible()) togglePatch();
+            midiPanel.refreshDevices();
+            midiPanel.refresh();
+        }
+        midiPanel.setVisible(show);
+        if (show)
+            midiPanel.toFront(false);
+        midiBtn.setButtonText(show ? "Rack" : "MIDI");
+        repaint();
+    }
+
     void togglePatch()
     {
         const bool show = ! patchPanel.isVisible();
@@ -2837,6 +2881,8 @@ private:
                 toggleInputs();
             if (showsPanel.isVisible())
                 toggleShows();
+            if (midiPanel.isVisible())
+                toggleMidi();
             patchPanel.refresh();
         }
         patchPanel.setVisible(show);
@@ -2853,6 +2899,8 @@ private:
         {
             if (patchPanel.isVisible())
                 togglePatch();
+            if (midiPanel.isVisible())
+                toggleMidi();
             if (editorHost.isVisible())
                 closeInlineEditor(true);
             if (inputsPanel.isVisible())
@@ -2873,6 +2921,8 @@ private:
         {
             if (patchPanel.isVisible())
                 togglePatch();
+            if (midiPanel.isVisible())
+                toggleMidi();
             if (showsPanel.isVisible())
                 toggleShows();
             if (editorHost.isVisible())
@@ -3805,13 +3855,14 @@ private:
     juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
-    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn;
+    juce::TextButton scanBtn, audioBtn, hotBtn, saveBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn, midiBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
     EqPanel eqPanel { engine };
     InputsPanel inputsPanel { engine };
     ShowsPanel showsPanel { getShowsDir() };
     PatchPanel patchPanel { engine };
+    MidiPanel midiPanel { engine.midi };
     int checking = 0;
     juce::String checkingName;
     juce::File lockFile = getDataDir().getChildFile("session.lock");
