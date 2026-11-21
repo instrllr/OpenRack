@@ -563,7 +563,7 @@ public:
         g.setFont(juce::FontOptions(12.0f));
         g.drawText("Inputs your DAW has switched on are lit; choose each rack's In / Out pair in the rack header. "
                    "FL Studio: send a mixer track to an OpenRack input. Logic Pro: input 2 is the side-chain.",
-                   descArea.withTrimmedLeft(8), juce::Justification::centredLeft, true);
+                   16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
     }
 
     void resized() override
@@ -658,7 +658,7 @@ public:
             : juce::String("Click a crosspoint to patch, click again to remove. Clicking an empty rack row creates the rack. ");
         g.drawText(note + "Dimmed sockets are not on your device right now (" + juce::String(avail)
                        + " of 64 pairs available).",
-                   16, 28, getWidth() - 32, 18, juce::Justification::centredLeft, true);
+                   descArea.withTrimmedLeft(8), juce::Justification::centredLeft, true);
     }
 
     void resized() override
