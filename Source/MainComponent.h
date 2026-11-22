@@ -1751,7 +1751,8 @@ private:
 class SplashOverlay : public juce::Component, private juce::Timer
 {
 public:
-    SplashOverlay()
+    // Pass an image to show your own splash screen instead of the built-in animation.
+    explicit SplashOverlay(juce::Image custom = {}) : image(std::move(custom))
     {
         setInterceptsMouseClicks(true, false);
         start = juce::Time::getMillisecondCounterHiRes();
@@ -1765,8 +1766,20 @@ public:
     void paint(juce::Graphics& g) override
     {
         const float t = elapsed();                       // seconds
-        const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - 1.5f) / 0.5f));
+        const float total = duration();
+        const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - (total - 0.5f)) / 0.5f));
         const float cx = (float) getWidth() * 0.5f, cy = (float) getHeight() * 0.5f;
+
+        if (image.isValid())
+        {
+            g.setColour(Theme::background().withAlpha(fadeOut));
+            g.fillAll();
+            const float inP = ease(juce::jlimit(0.0f, 1.0f, t / 0.4f));
+            g.setOpacity(inP * fadeOut);
+            const auto area = getLocalBounds().toFloat().reduced((float) getWidth() * 0.08f, (float) getHeight() * 0.08f);
+            g.drawImage(image, area, juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+            return;
+        }
 
         g.setColour(Theme::background().withAlpha(fadeOut));
         g.fillAll();
@@ -1810,6 +1823,7 @@ public:
     }
 
 private:
+    float duration() const { return image.isValid() ? 2.6f : 2.0f; }
     float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
     static float ease(float x) { return 1.0f - (1.0f - x) * (1.0f - x) * (1.0f - x); }
 
@@ -1817,7 +1831,7 @@ private:
 
     void timerCallback() override
     {
-        if (elapsed() >= 2.0f)
+        if (elapsed() >= duration())
         {
             stopTimer();
             setVisible(false);
@@ -1828,6 +1842,7 @@ private:
         repaint();
     }
 
+    juce::Image image;
     double start = 0.0;
 };
 
@@ -2053,7 +2068,19 @@ public:
 
         if (engine.ownsAudioDevice())
         {
-            splash = std::make_unique<SplashOverlay>();
+            // Drop splash.png (or .jpg / .gif) into the OpenRack data folder to use your own splash screen.
+            juce::Image custom;
+            for (auto* name : { "splash.png", "splash.jpg", "splash.jpeg", "splash.gif" })
+            {
+                const auto f = RackEngine::getDataDirectory().getChildFile(name);
+                if (f.existsAsFile())
+                {
+                    custom = juce::ImageFileFormat::loadFrom(f);
+                    if (custom.isValid())
+                        break;
+                }
+            }
+            splash = std::make_unique<SplashOverlay>(custom);
             splash->onFinished = [this] { splash.reset(); };
             addAndMakeVisible(*splash);
             splash->toFront(false);
