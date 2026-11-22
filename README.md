@@ -56,3 +56,5 @@ i am simply making this mostly for myself but it is available to anyone who want
 
 - **MIDI activity light** in the status bar (green flash on incoming MIDI, accent ring when a binding fires; click to open MIDI setup).
 - **Global tempo** (20-500 BPM) in the toolbar: tap tempo (also bindable to a MIDI button), slider or +/- buttons. Hosted plugins receive it as host tempo (standalone app).
+- **Dropout monitoring**: the status bar shows peak CPU and a dropout counter (late/overlong audio callbacks and driver xruns); double-click it to reset.
+- **Device reconnection**: if the audio interface or MIDI controller is unplugged, OpenRack waits and reopens it automatically when it returns.

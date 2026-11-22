@@ -201,6 +201,66 @@ public:
             setTempo(60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)));
     }
 
+    //--------------------------------------------------------------------------
+    // Audio dropout monitoring (standalone app). A dropout is counted when a callback takes longer
+    // than the time its block represents, when the gap between two callbacks is much longer than
+    // one block, or when the driver itself reports an xrun.
+    int getDropouts() const { return dropouts.load(); }
+    int getPeakLoadPercent() const { return (int) std::lround(peakLoad.load() * 100.0f); }
+    void resetDropouts() { dropouts.store(0); peakLoad.store(0.0f); lastXruns = -1; }
+
+    // Message thread, every ~0.5 s. Announces new dropouts and brings a lost audio / MIDI device back.
+    void pollDevices()
+    {
+        if (! ownsDevice)
+            return;
+
+        const int d = dropouts.load();
+        if (d > shownDropouts)
+        {
+            if (onMessage)
+                onMessage("Audio dropout! (" + juce::String(d) + " so far) - raise the buffer size or lighten the racks");
+            shownDropouts = d;
+        }
+        else if (d < shownDropouts)
+            shownDropouts = d;
+
+        if (auto* dev = deviceManager.getCurrentAudioDevice())
+        {
+            const int x = dev->getXRunCount();
+            if (x >= 0)
+            {
+                if (lastXruns >= 0 && x > lastXruns)
+                    dropouts.fetch_add(x - lastXruns);
+                lastXruns = x;
+            }
+            wantedSetup = deviceManager.getAudioDeviceSetup();
+            deviceLost = false;
+            missingTicks = 0;
+        }
+        else if (wantedSetup.outputDeviceName.isNotEmpty() || wantedSetup.inputDeviceName.isNotEmpty())
+        {
+            if (! deviceLost)
+            {
+                deviceLost = true;
+                if (onMessage)
+                    onMessage("Audio device disconnected - waiting for it to come back");
+            }
+
+            if (++missingTicks % 4 == 0)   // about every 2 s
+                tryReconnectAudio();
+        }
+
+        if (++midiTicks % 4 == 0)
+        {
+            const auto m = midi.pollReconnect();
+            if (m.isNotEmpty() && onMessage)
+                onMessage(m);
+        }
+    }
+
+    bool isAudioDeviceLost() const { return deviceLost; }
+
     // Out-of-process hosting (standalone app): run newly loaded plugins in their own helper process.
     bool getIsolatePlugins() const { return isolatePlugins.load(); }
 
@@ -1023,18 +1083,37 @@ private:
         {
             engine.numInputPairs = 0;
             engine.numOutputPairs = 0;
+            lastStart = 0.0;
+            warm = 0;
         }
 
         void audioDeviceIOCallbackWithContext(const float* const* in, int numIn, float* const* out,
                                               int numOut, int numSamples,
                                               const juce::AudioIODeviceCallbackContext&) override
         {
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
             midi.clear();
             engine.processMulti(in, numIn, out, numOut, numSamples, midi, nullptr);
+            const double t1 = juce::Time::getMillisecondCounterHiRes();
+
+            const double budget = 1000.0 * (double) numSamples / juce::jmax(1.0, engine.sampleRate);
+            const float load = (float) ((t1 - t0) / budget);
+            if (load > engine.peakLoad.load())
+                engine.peakLoad.store(load);
+
+            bool bad = load > 1.0f;
+            if (lastStart > 0.0 && t0 - lastStart > budget * 1.8 + 2.0)
+                bad = true;                         // the driver called us late: a block was missed
+            if (bad && warm > 50)                   // ignore start-up hiccups
+                engine.dropouts.fetch_add(1);
+            lastStart = t0;
+            if (warm <= 50) ++warm;
         }
 
         RackEngine& engine;
         juce::MidiBuffer midi;
+        double lastStart = 0.0;
+        int warm = 0;
     };
 
     //--------------------------------------------------------------------------
@@ -1476,6 +1555,32 @@ private:
     std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
     std::atomic<bool> isolatePlugins { false };
     TempoPlayHead tempoHead;
+    std::atomic<int> dropouts { 0 };
+    std::atomic<float> peakLoad { 0.0f };
+    int shownDropouts = 0, lastXruns = -1, missingTicks = 0, midiTicks = 0;
+    bool deviceLost = false;
+    juce::AudioDeviceManager::AudioDeviceSetup wantedSetup;
+
+    void tryReconnectAudio()
+    {
+        auto& type = *deviceManager.getCurrentDeviceTypeObject();
+        type.scanForDevices();
+        const auto outs = type.getDeviceNames(false);
+        const auto ins = type.getDeviceNames(true);
+        const bool outOk = wantedSetup.outputDeviceName.isEmpty() || outs.contains(wantedSetup.outputDeviceName);
+        const bool inOk = wantedSetup.inputDeviceName.isEmpty() || ins.contains(wantedSetup.inputDeviceName);
+        if (! (outOk && inOk))
+            return;
+
+        const auto err = deviceManager.setAudioDeviceSetup(wantedSetup, true);
+        if (err.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
+        {
+            deviceLost = false;
+            lastXruns = -1;
+            if (onMessage)
+                onMessage("Audio device reconnected");
+        }
+    }
     std::vector<double> taps;
 
     juce::AudioProcessorGraph graph;

@@ -2045,6 +2045,13 @@ public:
         engine.knownPlugins.removeChangeListener(this);
     }
 
+    // Double-click the status bar to reset the dropout counter and peak CPU.
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (statusBar.contains(e.getPosition()))
+            engine.resetDropouts();
+    }
+
     void paint(juce::Graphics& g) override
     {
         const float w = (float) getWidth();
@@ -3581,12 +3588,19 @@ private:
             s = dev->getTypeName() + "  -  " + dev->getName()
                 + "      " + juce::String((int) sr) + " Hz"
                 + "      " + juce::String(bs) + " samples (" + juce::String(ms, 1) + " ms)"
-                + "      CPU " + juce::String(cpu) + "%";
+                + "      CPU " + juce::String(cpu) + "% (peak " + juce::String(engine.getPeakLoadPercent()) + "%)"
+                + "      Dropouts " + juce::String(engine.getDropouts());
+        }
+        else if (engine.isAudioDeviceLost())
+        {
+            s = "Audio device disconnected - waiting for it to come back (or open Audio settings)";
         }
         else
         {
             s = "No audio device - open Audio settings";
         }
+
+        engine.pollDevices();
 
         if (checking > 0)
             s = "Checking " + checkingName + " in a separate process before loading it...";

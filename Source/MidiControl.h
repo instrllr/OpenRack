@@ -102,6 +102,49 @@ public:
 
     juce::String getInputName() const { return inputName; }
     juce::String getOutputName() const { return outputName; }
+    // Called every couple of seconds: reopen a controller that was unplugged and plugged back in,
+    // and drop one that has disappeared. Returns a message when something changed.
+    juce::String pollReconnect()
+    {
+        juce::String msg;
+
+        auto present = [](const juce::Array<juce::MidiDeviceInfo>& devs, const juce::String& id, const juce::String& name)
+        {
+            for (auto& d : devs)
+                if (d.identifier == id || d.name == name) return true;
+            return false;
+        };
+
+        if (inputId.isNotEmpty())
+        {
+            const bool here = present(availableInputs(), inputId, inputName);
+            if (input != nullptr && ! here)
+            {
+                input.reset();
+                msg = "MIDI input " + inputName + " disconnected - waiting for it to come back";
+                changed();
+            }
+            else if (input == nullptr && here)
+            {
+                openInput();
+                if (input != nullptr) { msg = "MIDI input " + inputName + " reconnected"; changed(); }
+            }
+        }
+
+        if (outputId.isNotEmpty())
+        {
+            const bool here = present(availableOutputs(), outputId, outputName);
+            if (output != nullptr && ! here)
+                output.reset();
+            else if (output == nullptr && here)
+            {
+                openOutput();
+                if (output != nullptr && msg.isEmpty()) msg = "MIDI output " + outputName + " reconnected";
+            }
+        }
+        return msg;
+    }
+
     bool isInputOpen() const { return input != nullptr; }
     bool isOutputOpen() const { return output != nullptr; }
 
