@@ -226,8 +226,7 @@ static OSStatus getProperty(AudioObjectID obj, const AudioObjectPropertyAddress*
             case kAudioDevicePropertyTransportType: RETURN_U32(kAudioDeviceTransportTypeVirtual);
             case kAudioDevicePropertyClockDomain: RETURN_U32(0);
             case kAudioDevicePropertyDeviceIsAlive: RETURN_U32(1);
-            case kAudioDevicePropertyDeviceIsRunning:
-            case kAudioDevicePropertyDeviceIsRunningSomewhere: RETURN_U32(gIOCount > 0 ? 1 : 0);
+            case kAudioDevicePropertyDeviceIsRunning: RETURN_U32(gIOCount > 0 ? 1 : 0);
             case kAudioDevicePropertyDeviceCanBeDefaultDevice: RETURN_U32(1);
             case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: RETURN_U32(0);
             case kAudioDevicePropertyLatency:    RETURN_U32(0);
