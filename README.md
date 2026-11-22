@@ -5,6 +5,14 @@ A live plugin host in the spirit of Waves SuperRack, built with JUCE 8. It runs 
 - **Standalone app** - opens your audio interface and runs the rack on it.
 - **Plugin (VST3 / AU)** - load OpenRack on a mixer channel in FL Studio, Ableton Live (VST3) or Logic Pro (AU) and host your effects inside it.
 
+## Screenshots
+
+| Racks | Patch bay |
+|---|---|
+| ![Rack view with plugin browser, hot plugins and mixer](docs/images/racks.png) | ![64 x 64 stereo patch bay](docs/images/patch-bay.png) |
+| **MIDI control** | **Shows** |
+| ![MIDI learn view with banks, faders, mutes and tap tempo](docs/images/midi.png) | ![Shows library](docs/images/shows.png) |
+
 ## Features
 - Scan and host effect plugins (VST3, plus AudioUnit on macOS); instruments are hidden
 - **Up to 64 stereo racks** (like SuperRack Performer), each with its own plugin chain, fader, mute, solo and meters. A rack is patched from any stereo **input pair** to any stereo **output pair** (standalone: your interface's channels, up to 128 in / 128 out; plugin: the DAW's 64 input and 64 output buses)
