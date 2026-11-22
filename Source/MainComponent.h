@@ -4,6 +4,10 @@
 #include "Theme.h"
 #include "HotPlugins.h"
 #include "MidiPanel.h"
+#if OPENRACK_SPLASH_VIDEO
+ #include <juce_video/juce_video.h>
+ #include "SplashData.h"
+#endif
 
 static constexpr int kRackRowHeight = 56;
 
@@ -1752,19 +1756,43 @@ class SplashOverlay : public juce::Component, private juce::Timer
 {
 public:
     // Pass an image to show your own splash screen instead of the built-in animation.
-    explicit SplashOverlay(juce::Image custom = {}) : image(std::move(custom))
+    SplashOverlay()
     {
         setInterceptsMouseClicks(true, false);
+        setWantsKeyboardFocus(true);
         start = juce::Time::getMillisecondCounterHiRes();
-        startTimerHz(60);
+#if OPENRACK_SPLASH_VIDEO
+        startVideo();
+#endif
+        startTimerHz(video != nullptr ? 10 : 60);
     }
 
     std::function<void()> onFinished;
 
     void mouseDown(const juce::MouseEvent&) override { skip(); }
+    bool keyPressed(const juce::KeyPress&) override { skip(); return true; }
+
+    void resized() override
+    {
+#if OPENRACK_SPLASH_VIDEO
+        if (video != nullptr)
+        {
+            // Keep the film's 16:9 shape, centred on the window.
+            const auto area = juce::RectanglePlacement(juce::RectanglePlacement::centred)
+                                  .appliedTo(juce::Rectangle<float>(16.0f, 9.0f), getLocalBounds().toFloat());
+            video->setBounds(area.toNearestInt());
+        }
+#endif
+    }
 
     void paint(juce::Graphics& g) override
     {
+        if (video != nullptr)
+        {
+            g.fillAll(juce::Colour(0xff101010));          // the film's own background colour
+            return;
+        }
+
         const float t = elapsed();                       // seconds
         const float total = duration();
         const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - (total - 0.5f)) / 0.5f));
@@ -1823,25 +1851,66 @@ public:
     }
 
 private:
-    float duration() const { return image.isValid() ? 2.6f : 2.0f; }
+    float duration() const { return video != nullptr ? 12.0f : (image.isValid() ? 2.6f : 2.0f); }
     float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
     static float ease(float x) { return 1.0f - (1.0f - x) * (1.0f - x) * (1.0f - x); }
 
-    void skip() { start -= 3000.0; timerCallback(); }
+    void skip()
+    {
+        if (video != nullptr)
+            finished = true;
+        else
+            start -= 3000.0;
+        timerCallback();
+    }
+
+#if OPENRACK_SPLASH_VIDEO
+    void startVideo()
+    {
+        // The film is compiled into the app; the system player needs a real file, so unpack it once.
+        const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                              .getChildFile("OpenRack-splash-" + juce::String(SplashData::splash_mp4Size) + ".mp4");
+        if (! file.existsAsFile() || file.getSize() != (juce::int64) SplashData::splash_mp4Size)
+            if (! file.replaceWithData(SplashData::splash_mp4, (size_t) SplashData::splash_mp4Size))
+                return;
+
+        auto v = std::make_unique<juce::VideoComponent>(false);
+        if (v->load(file).failed())
+            return;
+
+        v->onPlaybackStopped = [this] { finished = true; };
+        v->onErrorOccurred = [this](const juce::String&) { finished = true; };
+        video = std::move(v);
+        addAndMakeVisible(*video);
+        video->setInterceptsMouseClicks(false, false);
+        video->play();
+    }
+#endif
 
     void timerCallback() override
     {
-        if (elapsed() >= duration())
+        if (elapsed() >= duration() || (video != nullptr && finished))
         {
+#if OPENRACK_SPLASH_VIDEO
+            if (video != nullptr)
+                video->stop();
+#endif
             stopTimer();
             setVisible(false);
             if (onFinished)
                 juce::MessageManager::callAsync(onFinished);
             return;
         }
-        repaint();
+        if (video == nullptr)
+            repaint();
     }
 
+#if OPENRACK_SPLASH_VIDEO
+    std::unique_ptr<juce::VideoComponent> video;
+#else
+    std::unique_ptr<juce::Component> video;     // never set on platforms without video support
+#endif
+    bool finished = false;
     juce::Image image;
     double start = 0.0;
 };
@@ -2068,19 +2137,7 @@ public:
 
         if (engine.ownsAudioDevice())
         {
-            // Drop splash.png (or .jpg / .gif) into the OpenRack data folder to use your own splash screen.
-            juce::Image custom;
-            for (auto* name : { "splash.png", "splash.jpg", "splash.jpeg", "splash.gif" })
-            {
-                const auto f = RackEngine::getDataDirectory().getChildFile(name);
-                if (f.existsAsFile())
-                {
-                    custom = juce::ImageFileFormat::loadFrom(f);
-                    if (custom.isValid())
-                        break;
-                }
-            }
-            splash = std::make_unique<SplashOverlay>(custom);
+            splash = std::make_unique<SplashOverlay>();
             splash->onFinished = [this] { splash.reset(); };
             addAndMakeVisible(*splash);
             splash->toFront(false);

@@ -27,6 +27,16 @@ if(APPLE)
     target_compile_definitions(OpenRack PRIVATE JUCE_PLUGINHOST_AU=1)
 endif()
 
+# Start-up film (macOS / Windows): compiled into the app and played with the system video player.
+if(APPLE OR WIN32)
+    juce_add_binary_data(OpenRackSplashData
+        HEADER_NAME SplashData.h
+        NAMESPACE SplashData
+        SOURCES Resources/splash.mp4)
+    target_compile_definitions(OpenRack PRIVATE OPENRACK_SPLASH_VIDEO=1)
+    target_link_libraries(OpenRack PRIVATE OpenRackSplashData juce::juce_video)
+endif()
+
 target_link_libraries(OpenRack PRIVATE
     juce::juce_audio_utils
     juce::juce_audio_processors
