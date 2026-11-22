@@ -1745,6 +1745,92 @@ private:
 };
 
 //==============================================================================
+//==============================================================================
+// Short start-up animation: the accent bar grows, the name slides in, a light sweeps across, then
+// the whole thing fades away. Click (or press any key) to skip.
+class SplashOverlay : public juce::Component, private juce::Timer
+{
+public:
+    SplashOverlay()
+    {
+        setInterceptsMouseClicks(true, false);
+        start = juce::Time::getMillisecondCounterHiRes();
+        startTimerHz(60);
+    }
+
+    std::function<void()> onFinished;
+
+    void mouseDown(const juce::MouseEvent&) override { skip(); }
+
+    void paint(juce::Graphics& g) override
+    {
+        const float t = elapsed();                       // seconds
+        const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - 1.5f) / 0.5f));
+        const float cx = (float) getWidth() * 0.5f, cy = (float) getHeight() * 0.5f;
+
+        g.setColour(Theme::background().withAlpha(fadeOut));
+        g.fillAll();
+
+        const float barP = ease(juce::jlimit(0.0f, 1.0f, t / 0.45f));
+        const float textP = ease(juce::jlimit(0.0f, 1.0f, (t - 0.15f) / 0.5f));
+        const float subP = ease(juce::jlimit(0.0f, 1.0f, (t - 0.45f) / 0.45f));
+
+        // Soft glow behind the logo
+        g.setGradientFill(juce::ColourGradient(Theme::accent().withAlpha(0.18f * barP * fadeOut), cx, cy,
+                                               Theme::accent().withAlpha(0.0f), cx + 320.0f, cy, true));
+        g.fillEllipse(cx - 320.0f, cy - 320.0f, 640.0f, 640.0f);
+
+        // Accent bar (grows from the middle)
+        const float barH = 54.0f * barP;
+        g.setColour(Theme::accent().withAlpha(fadeOut));
+        g.fillRoundedRectangle(cx - 150.0f, cy - barH * 0.5f, 9.0f, barH, 4.5f);
+
+        // Name
+        g.setColour(Theme::text().withAlpha(textP * fadeOut));
+        g.setFont(juce::FontOptions(54.0f, juce::Font::bold));
+        g.drawText("OpenRack", juce::Rectangle<float>(cx - 128.0f + (1.0f - textP) * 24.0f, cy - 34.0f, 320.0f, 68.0f),
+                   juce::Justification::centredLeft);
+
+        g.setColour(Theme::muted().withAlpha(subP * fadeOut));
+        g.setFont(juce::FontOptions(16.0f));
+        g.drawText("live plugin host", juce::Rectangle<float>(cx - 124.0f, cy + 36.0f + (1.0f - subP) * 8.0f, 320.0f, 24.0f),
+                   juce::Justification::centredLeft);
+
+        // Light sweeping along a thin line
+        const float lineY = cy + 86.0f;
+        const float half = 170.0f;
+        g.setColour(Theme::outline().withAlpha(0.8f * subP * fadeOut));
+        g.fillRect(cx - half, lineY, half * 2.0f, 1.5f);
+        const float sweep = juce::jlimit(0.0f, 1.0f, (t - 0.5f) / 1.0f);
+        const float sx = cx - half + 2.0f * half * ease(sweep);
+        g.setGradientFill(juce::ColourGradient(Theme::accent().withAlpha(0.0f), sx - 60.0f, lineY,
+                                               Theme::accent().withAlpha(0.95f * fadeOut), sx, lineY, false));
+        g.fillRect(juce::Rectangle<float>(juce::jmax(cx - half, sx - 60.0f), lineY - 0.5f,
+                                          juce::jmin(60.0f, sx - (cx - half)), 2.5f));
+    }
+
+private:
+    float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
+    static float ease(float x) { return 1.0f - (1.0f - x) * (1.0f - x) * (1.0f - x); }
+
+    void skip() { start -= 3000.0; timerCallback(); }
+
+    void timerCallback() override
+    {
+        if (elapsed() >= 2.0f)
+        {
+            stopTimer();
+            setVisible(false);
+            if (onFinished)
+                juce::MessageManager::callAsync(onFinished);
+            return;
+        }
+        repaint();
+    }
+
+    double start = 0.0;
+};
+
 class MainComponent : public juce::Component,
                       public juce::DragAndDropContainer,
                       public juce::DragAndDropTarget,
@@ -1964,6 +2050,14 @@ public:
             flashUntil = juce::Time::getMillisecondCounter() + 9000;
         };
         addAndMakeVisible(midiLed);
+
+        if (engine.ownsAudioDevice())
+        {
+            splash = std::make_unique<SplashOverlay>();
+            splash->onFinished = [this] { splash.reset(); };
+            addAndMakeVisible(*splash);
+            splash->toFront(false);
+        }
         midiLed.onClick = [this] { if (! midiPanel.isVisible()) toggleMidi(); };
 
         tempoLabel.setText("BPM", juce::dontSendNotification);
@@ -2189,6 +2283,8 @@ public:
     void resized() override
     {
         editorHost.setBounds(getLocalBounds());
+        if (splash != nullptr)
+            splash->setBounds(getLocalBounds());
 
         auto r = getLocalBounds().reduced(16);
 
@@ -3905,6 +4001,7 @@ private:
     PatchPanel patchPanel { engine };
     MidiPanel midiPanel { engine.midi };
     MidiActivityLed midiLed { engine.midi };
+    std::unique_ptr<SplashOverlay> splash;
     juce::Slider tempoSlider;
     juce::Label tempoLabel;
     juce::TextButton tapBtn;
