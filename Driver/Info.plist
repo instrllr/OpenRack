@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>English</string>
+    <key>CFBundleExecutable</key><string>OpenRack</string>
+    <key>CFBundleIdentifier</key><string>com.openrack.driver</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>OpenRack Virtual Audio</string>
+    <key>CFBundlePackageType</key><string>BNDL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>0.1.0</string>
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>52F69D8B-F3A2-41ED-B926-26E75A3648A3</key><string>OpenRackDriverCreate</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array><string>52F69D8B-F3A2-41ED-B926-26E75A3648A3</string></array>
+    </dict>
+</dict>
+</plist>

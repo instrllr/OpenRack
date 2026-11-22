@@ -58,3 +58,4 @@ i am simply making this mostly for myself but it is available to anyone who want
 - **Global tempo** (20-500 BPM) in the toolbar: tap tempo (also bindable to a MIDI button), slider or +/- buttons. Hosted plugins receive it as host tempo (standalone app).
 - **Dropout monitoring**: the status bar shows peak CPU and a dropout counter (late/overlong audio callbacks and driver xruns); double-click it to reset.
 - **Device reconnection**: if the audio interface or MIDI controller is unplugged, OpenRack waits and reopens it automatically when it returns.
+- **OpenRack Virtual Audio (macOS)**: a 16-channel loopback Core Audio device. Install `OpenRack-Driver-macOS.pkg`, then play any app to it and pick it as OpenRack's audio input. See `Driver/`.

@@ -76,3 +76,17 @@ target_link_libraries(OpenRackPlugin PRIVATE
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+#------------------------------------------------------------------------------
+# macOS virtual audio device (Core Audio AudioServerPlugIn): 16-channel loopback, so any app can be
+# routed into OpenRack. Installs to /Library/Audio/Plug-Ins/HAL (see Driver/install.sh).
+if(APPLE)
+    add_library(OpenRackDriver MODULE Driver/OpenRackDriver.c)
+    set_target_properties(OpenRackDriver PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION "driver"
+        OUTPUT_NAME "OpenRack"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Driver/Info.plist"
+        OSX_ARCHITECTURES "arm64;x86_64")
+    target_link_libraries(OpenRackDriver PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+endif()

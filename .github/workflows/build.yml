@@ -81,6 +81,23 @@ jobs:
           (cd "$(dirname "$VST3")" && ditto -c -k --keepParent OpenRack.vst3 "$GITHUB_WORKSPACE/OpenRack-VST3-macOS.zip")
           (cd "$(dirname "$AU")" && ditto -c -k --keepParent OpenRack.component "$GITHUB_WORKSPACE/OpenRack-AU-macOS.zip")
 
+      - name: Package virtual audio driver (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          DRV=$(find build -maxdepth 3 -type d -name OpenRack.driver | head -1)
+          echo "Driver bundle: $DRV"
+          test -x "$DRV/Contents/MacOS/OpenRack"
+          lipo -info "$DRV/Contents/MacOS/OpenRack"
+          codesign --force --sign - "$DRV"
+          ROOT="$GITHUB_WORKSPACE/pkgroot-driver"
+          mkdir -p "$ROOT/Library/Audio/Plug-Ins/HAL" scripts-driver
+          cp -R "$DRV" "$ROOT/Library/Audio/Plug-Ins/HAL/"
+          printf '#!/bin/bash\nkillall coreaudiod || true\nexit 0\n' > scripts-driver/postinstall
+          chmod +x scripts-driver/postinstall
+          pkgbuild --root "$ROOT" --scripts scripts-driver --identifier com.openrack.driver \
+            --version 0.1.0 --install-location / OpenRack-Driver-macOS.pkg
+          (cd "$(dirname "$DRV")" && ditto -c -k --keepParent OpenRack.driver "$GITHUB_WORKSPACE/OpenRack-Driver-macOS.zip")
+
       - name: Package plugins (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -184,5 +201,7 @@ jobs:
             OpenRack-VST3-macOS.zip
             OpenRack-AU-macOS.zip
             OpenRack-Plugins-macOS.pkg
+            OpenRack-Driver-macOS.pkg
+            OpenRack-Driver-macOS.zip
             OpenRack-VST3-Windows.zip
           if-no-files-found: error
