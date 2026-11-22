@@ -1759,28 +1759,23 @@ public:
     SplashOverlay()
     {
         setInterceptsMouseClicks(true, false);
-        setWantsKeyboardFocus(true);
         start = juce::Time::getMillisecondCounterHiRes();
 #if OPENRACK_SPLASH_VIDEO
         startVideo();
 #endif
-        startTimerHz(video != nullptr ? 10 : 60);
+        startTimerHz(60);
     }
 
     std::function<void()> onFinished;
 
-    void mouseDown(const juce::MouseEvent&) override { skip(); }
-    bool keyPressed(const juce::KeyPress&) override { skip(); return true; }
+    void mouseDown(const juce::MouseEvent&) override { if (video == nullptr) skip(); }
 
     void resized() override
     {
 #if OPENRACK_SPLASH_VIDEO
         if (video != nullptr)
         {
-            // Keep the film's 16:9 shape, centred on the window.
-            const auto area = juce::RectanglePlacement(juce::RectanglePlacement::centred)
-                                  .appliedTo(juce::Rectangle<float>(16.0f, 9.0f), getLocalBounds().toFloat());
-            video->setBounds(area.toNearestInt());
+            video->setBounds(getLocalBounds());       // the film covers the whole application
         }
 #endif
     }
@@ -1789,7 +1784,9 @@ public:
     {
         if (video != nullptr)
         {
-            g.fillAll(juce::Colour(0xff101010));          // the film's own background colour
+            // The film fades itself in from / out to this colour; once it ends, this layer fades
+            // away to reveal the application.
+            g.fillAll(juce::Colour(0xff101018).withAlpha(coverAlpha));
             return;
         }
 
@@ -1857,10 +1854,7 @@ private:
 
     void skip()
     {
-        if (video != nullptr)
-            finished = true;
-        else
-            start -= 3000.0;
+        start -= 3000.0;
         timerCallback();
     }
 
@@ -1889,12 +1883,33 @@ private:
 
     void timerCallback() override
     {
-        if (elapsed() >= duration() || (video != nullptr && finished))
-        {
 #if OPENRACK_SPLASH_VIDEO
-            if (video != nullptr)
+        if (video != nullptr)
+        {
+            if (fadeStart == 0.0 && (finished || elapsed() >= duration()))
+            {
                 video->stop();
+                video->setVisible(false);              // the last frame is already the cover colour
+                fadeStart = juce::Time::getMillisecondCounterHiRes();
+            }
+            if (fadeStart != 0.0)
+            {
+                const float p = (float) ((juce::Time::getMillisecondCounterHiRes() - fadeStart) / 600.0);
+                coverAlpha = 1.0f - juce::jlimit(0.0f, 1.0f, p);
+                repaint();
+                if (p < 1.0f)
+                    return;
+                stopTimer();
+                setVisible(false);
+                if (onFinished)
+                    juce::MessageManager::callAsync(onFinished);
+            }
+            return;
+        }
 #endif
+
+        if (elapsed() >= duration())
+        {
             stopTimer();
             setVisible(false);
             if (onFinished)
@@ -1911,6 +1926,8 @@ private:
     std::unique_ptr<juce::Component> video;     // never set on platforms without video support
 #endif
     bool finished = false;
+    double fadeStart = 0.0;
+    float coverAlpha = 1.0f;
     juce::Image image;
     double start = 0.0;
 };
