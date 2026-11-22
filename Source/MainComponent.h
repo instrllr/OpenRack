@@ -1848,7 +1848,7 @@ public:
     }
 
 private:
-    float duration() const { return video != nullptr ? 12.0f : (image.isValid() ? 2.6f : 2.0f); }
+    float duration() const { return video != nullptr ? 6.0f : (image.isValid() ? 2.6f : 2.0f); }
     float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
     static float ease(float x) { return 1.0f - (1.0f - x) * (1.0f - x) * (1.0f - x); }
 
