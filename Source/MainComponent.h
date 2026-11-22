@@ -1968,7 +1968,9 @@ public:
 
         tempoLabel.setText("BPM", juce::dontSendNotification);
         tempoLabel.setColour(juce::Label::textColourId, Theme::muted());
-        tempoLabel.setJustificationType(juce::Justification::centredRight);
+        tempoLabel.setJustificationType(juce::Justification::centred);
+        tempoLabel.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+        tempoLabel.setBorderSize(juce::BorderSize<int>(0));
         tempoSlider.setSliderStyle(juce::Slider::IncDecButtons);
         tempoSlider.setIncDecButtonsMode(juce::Slider::incDecButtonsDraggable_Horizontal);
         tempoSlider.setRange(tempo::kMin, tempo::kMax, 0.1);
@@ -2197,11 +2199,12 @@ public:
 
         if (engine.ownsAudioDevice())
         {
-            auto t = top.removeFromRight(290);
+            auto t = top.removeFromRight(214);
             tapBtn.setBounds(t.removeFromRight(56).reduced(2, 4));
             t.removeFromRight(4);
-            tempoSlider.setBounds(t.removeFromRight(150).reduced(0, 6));
-            tempoLabel.setBounds(t.removeFromRight(40));
+            auto sl = t.removeFromRight(150);
+            tempoLabel.setBounds(sl.getX(), sl.getY() + 1, 70, 12);   // "BPM" sits above the value
+            tempoSlider.setBounds(sl.withTrimmedTop(14).withTrimmedBottom(2));
         }
 
         r.removeFromTop(16);
