@@ -180,7 +180,7 @@ public:
 
     void setTempo(double bpm)
     {
-        bpm = std::round(juce::jlimit(tempo::kMin, tempo::kMax, bpm) * 10.0) / 10.0;
+        bpm = std::round(juce::jlimit(tempo::kMin, tempo::kMax, bpm));   // whole BPM only
         if (std::abs(bpm - tempoHead.bpm.load()) < 1.0e-6)
             return;
         tempoHead.bpm.store(bpm);

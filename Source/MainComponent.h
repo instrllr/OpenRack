@@ -1973,8 +1973,8 @@ public:
         tempoLabel.setBorderSize(juce::BorderSize<int>(0));
         tempoSlider.setSliderStyle(juce::Slider::IncDecButtons);
         tempoSlider.setIncDecButtonsMode(juce::Slider::incDecButtonsDraggable_Horizontal);
-        tempoSlider.setRange(tempo::kMin, tempo::kMax, 0.1);
-        tempoSlider.setNumDecimalPlacesToDisplay(1);
+        tempoSlider.setRange(tempo::kMin, tempo::kMax, 1.0);
+        tempoSlider.setNumDecimalPlacesToDisplay(0);
         tempoSlider.setDoubleClickReturnValue(true, 120.0);
         tempoSlider.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 70, 24);
         tempoSlider.setTooltip("Global tempo (max 500 BPM). Hosted plugins see this as the host tempo. Double-click resets to 120");
