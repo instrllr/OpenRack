@@ -202,6 +202,124 @@ public:
     }
 
     //--------------------------------------------------------------------------
+    // Parameter faders: a fader that moves one parameter of one plugin in a rack.
+    static constexpr int kNumParamFaders = 8;
+
+    struct ParamFader
+    {
+        bool on = false;
+        juce::uint32 rackId = 0;
+        int slot = -1, param = -1;
+        juce::String plugin, name;
+    };
+
+    struct ParamSource
+    {
+        juce::uint32 rackId = 0;
+        int slot = 0;
+        juce::String label;
+    };
+
+    std::function<void()> onParamFadersChanged;
+
+    const ParamFader& getParamFaderInfo(int i) const { return paramFaders[(size_t) juce::jlimit(0, kNumParamFaders - 1, i)]; }
+
+    // Every plugin in every rack, for the parameter picker.
+    std::vector<ParamSource> listParamSources() const
+    {
+        std::vector<ParamSource> out;
+        for (auto& r : racks)
+            for (size_t k = 0; k < r->slots.size(); ++k)
+                out.push_back({ r->id, (int) k, r->name + "  -  " + juce::String((int) k + 1) + ": " + r->slots[k].desc.name });
+        return out;
+    }
+
+    // Null for a plugin that runs in its own helper process (its parameters live over there).
+    juce::AudioProcessor* getProcessorFor(juce::uint32 rackId, int slot) const
+    {
+        for (auto& r : racks)
+            if (r->id == rackId && slot >= 0 && slot < (int) r->slots.size())
+            {
+                auto* p = r->slots[(size_t) slot].node->getProcessor();
+                return dynamic_cast<remote::RemotePlugin*>(p) != nullptr ? nullptr : p;
+            }
+        return nullptr;
+    }
+
+    juce::AudioProcessorParameter* resolveParamFader(int i) const
+    {
+        if (i < 0 || i >= kNumParamFaders) return nullptr;
+        const auto& pf = paramFaders[(size_t) i];
+        if (! pf.on) return nullptr;
+
+        for (auto& r : racks)
+        {
+            if (r->id != pf.rackId) continue;
+
+            int idx = pf.slot;
+            if (idx < 0 || idx >= (int) r->slots.size() || r->slots[(size_t) idx].desc.name != pf.plugin)
+            {
+                idx = -1;       // the chain was reordered: find the plugin again by name
+                for (size_t k = 0; k < r->slots.size(); ++k)
+                    if (r->slots[k].desc.name == pf.plugin) { idx = (int) k; break; }
+            }
+            if (idx < 0) return nullptr;
+
+            auto* proc = getProcessorFor(r->id, idx);
+            if (proc == nullptr) return nullptr;
+            const auto& params = proc->getParameters();
+            return pf.param < params.size() ? params[pf.param] : nullptr;
+        }
+        return nullptr;
+    }
+
+    float getParamFaderValue(int i) const
+    {
+        auto* p = resolveParamFader(i);
+        return p != nullptr ? p->getValue() : -1.0f;
+    }
+
+    juce::String getParamFaderText(int i) const
+    {
+        auto* p = resolveParamFader(i);
+        if (p == nullptr) return {};
+        return (p->getText(p->getValue(), 12) + " " + p->getLabel()).trim();
+    }
+
+    void setParamFaderValue(int i, float v)
+    {
+        if (auto* p = resolveParamFader(i))
+            p->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, v));
+    }
+
+    void assignParamFader(int i, juce::uint32 rackId, int slot, int param)
+    {
+        auto* proc = getProcessorFor(rackId, slot);
+        if (i < 0 || i >= kNumParamFaders || proc == nullptr || param < 0 || param >= proc->getParameters().size())
+            return;
+
+        auto& pf = paramFaders[(size_t) i];
+        pf.on = true;
+        pf.rackId = rackId;
+        pf.slot = slot;
+        pf.param = param;
+        for (auto& r : racks)
+            if (r->id == rackId) pf.plugin = r->slots[(size_t) slot].desc.name;
+        pf.name = proc->getParameters()[param]->getName(40);
+
+        markDirty();
+        if (onParamFadersChanged) onParamFadersChanged();
+    }
+
+    void clearParamFader(int i)
+    {
+        if (i < 0 || i >= kNumParamFaders) return;
+        paramFaders[(size_t) i] = ParamFader();
+        markDirty();
+        if (onParamFadersChanged) onParamFadersChanged();
+    }
+
+    //--------------------------------------------------------------------------
     // Audio dropout monitoring (standalone app). A dropout is counted when a callback takes longer
     // than the time its block represents, when the gap between two callbacks is much longer than
     // one block, or when the driver itself reports an xrun.
@@ -870,6 +988,7 @@ public:
         if (same)
         {
             applyGroupsXml(*xml);
+            applyParamFadersXml(*xml);
             for (size_t k = 0; k < rackEls.size(); ++k)
             {
                 auto& r = *racks[k];
@@ -928,6 +1047,24 @@ public:
                     e->setAttribute("in", i);
                     e->setAttribute("out", o);
                 }
+
+        auto* pe = root->createNewChildElement("Params");
+        for (int i = 0; i < kNumParamFaders; ++i)
+        {
+            const auto& pf = paramFaders[(size_t) i];
+            if (! pf.on) continue;
+            for (size_t k = 0; k < racks.size(); ++k)
+                if (racks[k]->id == pf.rackId)
+                {
+                    auto* e = pe->createNewChildElement("P");
+                    e->setAttribute("i", i);
+                    e->setAttribute("rack", (int) k);        // position, since rack ids are not kept between sessions
+                    e->setAttribute("slot", pf.slot);
+                    e->setAttribute("param", pf.param);
+                    e->setAttribute("plugin", pf.plugin);
+                    e->setAttribute("name", pf.name);
+                }
+        }
 
         auto* ge = root->createNewChildElement("Groups");
         for (auto& g : groups)
@@ -1045,6 +1182,8 @@ private:
     bool midiHasSnapshot(int i) const override { return hasSnapshot(i); }
     int midiCurrentSnapshot() const override { return getCurrentSnapshot(); }
     void midiRecallSnapshot(int i) override { recallSnapshot(i); }
+    float midiGetParam(int i) const override { return getParamFaderValue(i); }
+    void midiSetParam(int i, float v) override { setParamFaderValue(i, v); }
     double midiGetTempo() const override { return getTempo(); }
     void midiSetTempo(double bpm) override { setTempo(bpm); }
     void midiTapTempo() override { tapTempo(); }
@@ -1123,6 +1262,31 @@ private:
         for (auto& g : groups)
             if (g.id == id) return true;
         return false;
+    }
+
+    void applyParamFadersXml(const juce::XmlElement& session)
+    {
+        for (auto& pf : paramFaders)
+            pf = ParamFader();
+
+        if (auto* pe = session.getChildByName("Params"))
+            for (auto* e : pe->getChildWithTagNameIterator("P"))
+            {
+                const int i = e->getIntAttribute("i", -1);
+                const int rackPos = e->getIntAttribute("rack", -1);
+                if (i < 0 || i >= kNumParamFaders || rackPos < 0 || rackPos >= (int) racks.size())
+                    continue;
+                auto& pf = paramFaders[(size_t) i];
+                pf.on = true;
+                pf.rackId = racks[(size_t) rackPos]->id;
+                pf.slot = e->getIntAttribute("slot", -1);
+                pf.param = e->getIntAttribute("param", -1);
+                pf.plugin = e->getStringAttribute("plugin");
+                pf.name = e->getStringAttribute("name");
+            }
+
+        if (onParamFadersChanged)
+            onParamFadersChanged();
     }
 
     void applyGroupsXml(const juce::XmlElement& session)
@@ -1387,6 +1551,7 @@ private:
             destroyRack(0);
 
         applyGroupsXml(*session);
+        applyParamFadersXml(*session);
 
         auto pending = std::make_shared<std::vector<PendingSlot>>();
 
@@ -1556,6 +1721,7 @@ private:
     std::shared_ptr<int> aliveToken = std::make_shared<int>(0);
     std::atomic<bool> isolatePlugins { false };
     TempoPlayHead tempoHead;
+    ParamFader paramFaders[kNumParamFaders];
     std::atomic<int> dropouts { 0 };
     std::atomic<float> peakLoad { 0.0f };
     int shownDropouts = 0, lastXruns = -1, missingTicks = 0, midiTicks = 0;

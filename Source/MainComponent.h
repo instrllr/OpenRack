@@ -6,6 +6,7 @@
 #include "MidiPanel.h"
 #include "PluginImages.h"
 #include "PluginCategories.h"
+#include "ParamFaders.h"
 #if OPENRACK_SPLASH_VIDEO
  #include <juce_video/juce_video.h>
  #include "SplashData.h"
@@ -2205,6 +2206,8 @@ public:
             flashUntil = juce::Time::getMillisecondCounter() + 9000;
         };
         addAndMakeVisible(midiLed);
+        addAndMakeVisible(paramBar);
+        engine.onParamFadersChanged = [this] { paramBar.refresh(); };
 
         if (engine.ownsAudioDevice())
         {
@@ -2293,6 +2296,7 @@ public:
         engine.midi.onChanged = nullptr;
         engine.midi.onApplied = nullptr;
         engine.onTempoChanged = nullptr;
+        engine.onParamFadersChanged = nullptr;
         engine.knownPlugins.removeChangeListener(this);
     }
 
@@ -2518,6 +2522,14 @@ public:
         eqPanel.setBounds(r);
 
         auto chainArea = r.reduced(10, 8);
+        if (chainArea.getHeight() > 360)
+        {
+            paramBar.setBounds(chainArea.removeFromBottom(ParamFaderBar::kHeight));
+            chainArea.removeFromBottom(6);
+            paramBar.setVisible(true);
+        }
+        else
+            paramBar.setVisible(false);
         auto patchRow = chainArea.removeFromTop(28);
         inLabel.setBounds(patchRow.removeFromLeft(24));
         inCombo.setBounds(patchRow.removeFromLeft((patchRow.getWidth() - 40) / 2));
@@ -4230,6 +4242,7 @@ private:
     PatchPanel patchPanel { engine };
     MidiPanel midiPanel { engine.midi };
     MidiActivityLed midiLed { engine.midi };
+    ParamFaderBar paramBar { engine };
     std::unique_ptr<SplashOverlay> splash;
     juce::Slider tempoSlider;
     juce::Label tempoLabel;

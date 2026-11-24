@@ -305,6 +305,9 @@ private:
         add(K::bankDown, 0);
         add(K::bankUp, 0);
 
+        header("PARAMETER FADERS  (assigned on the rack screen)");
+        for (int i = 0; i < 8; ++i) add(K::paramFader, i);
+
         const int n = midi.getStripCount();
         header("FADERS");
         for (int i = 0; i < n; ++i) add(K::fader, i);
@@ -326,6 +329,7 @@ private:
             case K::bankDown: return "Bank down  (previous racks)";
             case K::bankUp:   return "Bank up  (next racks)";
             case K::snapshot: return "Snapshot " + juce::String(a.index + 1);
+            case K::paramFader: return "Parameter fader " + juce::String(a.index + 1);
             default: break;
         }
         const auto what = a.kind == K::fader ? "Fader " : a.kind == K::mute ? "Mute " : "Solo ";

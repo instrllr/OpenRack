@@ -35,6 +35,8 @@ struct MidiHost
     virtual double midiGetTempo() const = 0;
     virtual void midiSetTempo(double bpm) = 0;
     virtual void midiTapTempo() = 0;
+    virtual float midiGetParam(int fader) const = 0;        // 0..1, or -1 when the fader has no parameter
+    virtual void midiSetParam(int fader, float normalised) = 0;
 };
 
 //==============================================================================
@@ -47,7 +49,7 @@ class MidiController : private juce::MidiInputCallback,
 {
 public:
     enum class Kind { fader = 0, mute = 1, solo = 2, master = 3, bankDown = 4, bankUp = 5, snapshot = 6,
-                      tempo = 7, tempoDown = 8, tempoUp = 9, tempoTap = 10 };
+                      tempo = 7, tempoDown = 8, tempoUp = 9, tempoTap = 10, paramFader = 11 };
     enum class SrcType { cc = 0, note = 1, pitchBend = 2 };
 
     struct Action
@@ -551,6 +553,13 @@ private:
                 return analog(actionKey(a), value, gainToNorm(host.midiGetFader(rack)),
                               [this, rack](float n) { host.midiSetFader(rack, normToGain(n)); });
             }
+            case Kind::paramFader:
+            {
+                const float cur = host.midiGetParam(a.index);
+                if (cur < 0.0f) return false;
+                const int idx = a.index;
+                return analog(actionKey(a), value, cur, [this, idx](float n) { host.midiSetParam(idx, n); });
+            }
             case Kind::master:
                 return analog(actionKey(a), value, gainToNorm(host.midiGetMaster()),
                               [this](float n) { host.midiSetMaster(normToGain(n)); });
@@ -639,11 +648,17 @@ private:
                 case Kind::fader:
                 case Kind::master:
                 case Kind::tempo:
+                case Kind::paramFader:
                 {
                     if (! faderFeedback) continue;
                     if (now - lastInput[actionKey(b.act)] < 500) continue;      // the user is touching it
                     float n;
-                    if (b.act.kind == Kind::master)
+                    if (b.act.kind == Kind::paramFader)
+                    {
+                        n = host.midiGetParam(b.act.index);
+                        if (n < 0.0f) continue;
+                    }
+                    else if (b.act.kind == Kind::master)
                         n = gainToNorm(host.midiGetMaster());
                     else if (b.act.kind == Kind::tempo)
                         n = juce::jlimit(0.0f, 1.0f, (float) ((host.midiGetTempo() - tempo::kMin) / (tempo::kMax - tempo::kMin)));
@@ -753,7 +768,7 @@ private:
         for (auto* e : xml->getChildWithTagNameIterator("Bind"))
         {
             Binding b;
-            b.act.kind = (Kind) juce::jlimit(0, 10, e->getIntAttribute("kind"));
+            b.act.kind = (Kind) juce::jlimit(0, 11, e->getIntAttribute("kind"));
             b.act.index = e->getIntAttribute("idx");
             b.src.type = (SrcType) juce::jlimit(0, 2, e->getIntAttribute("type"));
             b.src.channel = juce::jlimit(1, 16, e->getIntAttribute("ch", 1));
