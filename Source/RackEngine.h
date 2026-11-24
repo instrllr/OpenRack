@@ -781,22 +781,23 @@ public:
     {
         if (i < 0 || i >= getNumSlots()) return;
 
-        // Inside a DAW the editor is shown within OpenRack's own window instead.
-        if (onOpenEditorRequested)
+        auto node = cur().slots[(size_t) i].node;
+        auto uid = node->nodeID.uid;
+
+        auto* rp = dynamic_cast<remote::RemotePlugin*>(node->getProcessor());
+        if (rp != nullptr && rp->getState() == remote::RemotePlugin::State::failed)
+        {
+            rp->restart();      // it gave up after repeated crashes; try once more on request
+            return;
+        }
+
+        // The editor is shown inside OpenRack's own window. (A plugin running in a separate helper
+        // process has its window in that process, so that one stays a floating window.)
+        if (onOpenEditorRequested && rp == nullptr)
         {
             onOpenEditorRequested(i);
             return;
         }
-
-        auto node = cur().slots[(size_t) i].node;
-        auto uid = node->nodeID.uid;
-
-        if (auto* rp = dynamic_cast<remote::RemotePlugin*>(node->getProcessor()))
-            if (rp->getState() == remote::RemotePlugin::State::failed)
-            {
-                rp->restart();      // it gave up after repeated crashes; try once more on request
-                return;
-            }
 
         if (windows.count(uid) != 0)
         {

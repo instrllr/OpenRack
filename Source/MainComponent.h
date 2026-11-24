@@ -4,12 +4,13 @@
 #include "Theme.h"
 #include "HotPlugins.h"
 #include "MidiPanel.h"
+#include "PluginImages.h"
 #if OPENRACK_SPLASH_VIDEO
  #include <juce_video/juce_video.h>
  #include "SplashData.h"
 #endif
 
-static constexpr int kRackRowHeight = 56;
+static constexpr int kRackRowHeight = 72;
 
 static int measureText(const juce::String& text, float height, bool bold = false)
 {
@@ -145,7 +146,7 @@ public:
         down.setButtonText("v");
         remove.setButtonText("X");
 
-        edit.setTooltip("Open this plugin's window");
+        edit.setTooltip("Open this plugin inside OpenRack");
         bypass.setTooltip("Switch this plugin off without removing it");
         up.setTooltip("Move up (earlier in the chain)");
         down.setTooltip("Move down (later in the chain)");
@@ -168,6 +169,7 @@ public:
         {
             auto& s = engine.getSlot(r);
             name = s.desc.name;
+            imageId = s.desc.createIdentifierString();
             details = s.desc.manufacturerName + "  -  " + s.desc.pluginFormatName;
 
             const int lat = s.node->getProcessor()->getLatencySamples();
@@ -185,7 +187,26 @@ public:
     void paint(juce::Graphics& g) override
     {
         const bool bypassed = bypass.getToggleState();
-        const int textX = 66;
+        const auto thumb = PluginImages::get(imageId);
+        int textX = 66;
+        if (thumb.isValid())
+        {
+            const float boxH = (float) getHeight() - 16.0f;
+            const float boxW = juce::jmin(112.0f, boxH * 1.6f);
+            const auto box = juce::Rectangle<float>(66.0f, 8.0f, boxW, boxH);
+            g.setColour(Theme::control());
+            g.fillRoundedRectangle(box, 5.0f);
+            g.saveState();
+            juce::Path clip;
+            clip.addRoundedRectangle(box, 5.0f);
+            g.reduceClipRegion(clip);
+            g.setOpacity(bypassed ? 0.4f : 1.0f);
+            g.drawImage(thumb, box, juce::RectanglePlacement::centred);
+            g.restoreState();
+            g.setColour(Theme::outline());
+            g.drawRoundedRectangle(box, 5.0f, 1.0f);
+            textX = 66 + (int) boxW + 12;
+        }
         const int textW = juce::jmax(40, edit.getX() - textX - 8);
         const float cy = (float) getHeight() * 0.5f;
 
@@ -217,7 +238,7 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(8, 12);
+        auto r = getLocalBounds().reduced(8, 0).withSizeKeepingCentre(getWidth() - 16, 30);
         remove.setBounds(r.removeFromRight(28));
         r.removeFromRight(4);
         down.setBounds(r.removeFromRight(28));
@@ -232,7 +253,7 @@ public:
 private:
     RackEngine& engine;
     int row = 0;
-    juce::String name, details;
+    juce::String name, details, imageId;
     juce::TextButton edit, bypass, up, down, remove;
 };
 
@@ -336,9 +357,12 @@ public:
 
     ~InlineEditorHost() override { clear(); }
 
-    void show(juce::AudioProcessor& p, const juce::String& name)
+    std::function<void()> onImageChanged;
+
+    void show(juce::AudioProcessor& p, const juce::String& name, const juce::String& imageId = {})
     {
         clear();
+        imageKey = imageId;
 
         juce::AudioProcessorEditor* ed = p.hasEditor() ? p.createEditorIfNeeded() : nullptr;
         if (ed == nullptr)
@@ -351,10 +375,24 @@ public:
 
         layoutEditor();
         notifyWantedSize();
+
+        // Once the editor has drawn itself, keep a picture of it for the rack row.
+        juce::Component::SafePointer<InlineEditorHost> safe(this);
+        juce::Timer::callAfterDelay(900, [safe] { if (safe != nullptr) safe->capture(); });
+    }
+
+    void capture()
+    {
+        if (editor == nullptr || imageKey.isEmpty() || editor->getWidth() < 40)
+            return;
+        const auto shot = editor->createComponentSnapshot(editor->getLocalBounds(), true, 1.0f);
+        if (PluginImages::setCaptured(imageKey, shot) && onImageChanged)
+            onImageChanged();
     }
 
     void clear()
     {
+        capture();
         if (editor != nullptr)
         {
             editor->removeComponentListener(this);
@@ -377,6 +415,8 @@ public:
     }
 
 private:
+    juce::String imageKey;
+
     void layoutEditor()
     {
         if (editor != nullptr)
@@ -2203,13 +2243,13 @@ public:
         // Inline plugin editors (used when running inside a DAW).
         addChildComponent(editorHost);
         editorHost.onBack = [this] { closeInlineEditor(true); };
+        editorHost.onImageChanged = [this] { rackList.repaint(); };
         editorHost.onWantedSize = [this](int w, int h)
         {
             if (onRequestSize)
                 onRequestSize(juce::jmax(1180, w), juce::jmax(720, h));
         };
-        if (! engine.ownsAudioDevice())
-            engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
+        engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
         engine.onBeforeSlotRemoved = [this](juce::uint32 uid)
         {
             if (inlineNode == uid)
@@ -2609,6 +2649,11 @@ private:
             if (rows.size() > 0)
                 return "move:" + juce::String(rows[0]);
             return {};
+        }
+        void listBoxItemClicked(int row, const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu() && row >= 0 && row < getNumRows())
+                owner.showPluginImageMenu(row);
         }
         MainComponent& owner;
     };
@@ -3852,12 +3897,49 @@ private:
         auto& slot = engine.getSlot(row);
         inlineNode = slot.node->nodeID.uid;
         editorHost.setBounds(getLocalBounds());
-        editorHost.show(*slot.node->getProcessor(), slot.desc.name);
+        editorHost.show(*slot.node->getProcessor(), slot.desc.name, slot.desc.createIdentifierString());
         editorHost.setVisible(true);
         editorHost.toFront(false);
     }
 
     // restoreSize: put the window back to its size from before the editor opened.
+    void showPluginImageMenu(int row)
+    {
+        if (row < 0 || row >= engine.getNumSlots())
+            return;
+        const auto id = engine.getSlot(row).desc.createIdentifierString();
+        const auto pname = engine.getSlot(row).desc.name;
+
+        juce::PopupMenu m;
+        m.addSectionHeader(pname);
+        m.addItem(1, "Set plugin image...");
+        m.addItem(2, "Remove plugin image", PluginImages::get(id).isValid());
+        m.showMenuAsync({}, [this, id, pname](int r)
+        {
+            if (r == 1)
+            {
+                imageChooser = std::make_unique<juce::FileChooser>("Choose an image for " + pname, juce::File(),
+                                                                   "*.png;*.jpg;*.jpeg;*.gif");
+                imageChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                          [this, id](const juce::FileChooser& fc)
+                                          {
+                                              const auto f = fc.getResult();
+                                              if (f.existsAsFile())
+                                              {
+                                                  if (! PluginImages::setFromFile(id, f) && engine.onMessage)
+                                                      engine.onMessage("Could not read that image.");
+                                                  rackList.repaint();
+                                              }
+                                          });
+            }
+            else if (r == 2)
+            {
+                PluginImages::clear(id);
+                rackList.repaint();
+            }
+        });
+    }
+
     void closeInlineEditor(bool restoreSize)
     {
         const bool wasOpen = editorHost.isVisible();
@@ -4126,6 +4208,7 @@ private:
     int dropIndex = -1;
     bool fileDropActive = false;
     InlineEditorHost editorHost;
+    std::unique_ptr<juce::FileChooser> imageChooser;
     juce::uint32 inlineNode = 0;
     int preEditorW = 1180, preEditorH = 720;
     juce::File pluginListFile, deadMansFile;

@@ -158,7 +158,19 @@ struct EngineHolder { RackEngine engine { true }; };
 class StandaloneRack : private EngineHolder, public MainComponent
 {
 public:
-    StandaloneRack() : MainComponent(EngineHolder::engine) {}
+    StandaloneRack() : MainComponent(EngineHolder::engine)
+    {
+        // Plugin editors open inside this window; grow it to fit (within the screen) and restore afterwards.
+        onRequestSize = [this](int w, int h)
+        {
+            if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForPoint(getScreenBounds().getCentre()))
+            {
+                w = juce::jmin(w, d->userArea.getWidth() - 40);
+                h = juce::jmin(h, d->userArea.getHeight() - 80);
+            }
+            setSize(w, h);
+        };
+    }
 };
 
 class OpenRackApplication : public juce::JUCEApplication
