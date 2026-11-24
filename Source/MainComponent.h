@@ -5,6 +5,7 @@
 #include "HotPlugins.h"
 #include "MidiPanel.h"
 #include "PluginImages.h"
+#include "PluginCategories.h"
 #if OPENRACK_SPLASH_VIDEO
  #include <juce_video/juce_video.h>
  #include "SplashData.h"
@@ -2118,6 +2119,19 @@ public:
         searchBox.onReturnKey = [this] { addFromSearch(); };
         addAndMakeVisible(searchBox);
 
+        categoryBox.addItem("All types", 1);
+        for (int i = 0; i < PluginCategories::all().size(); ++i)
+            categoryBox.addItem(PluginCategories::all()[i], 2 + i);
+        categoryBox.setSelectedId(1, juce::dontSendNotification);
+        categoryBox.setTooltip("Show only one type of plugin. Right-click a plugin to change its type.");
+        categoryBox.onChange = [this]
+        {
+            const int id = categoryBox.getSelectedId();
+            categoryFilter = id >= 2 ? PluginCategories::all()[id - 2] : juce::String();
+            refresh();
+        };
+        addAndMakeVisible(categoryBox);
+
         pluginList.setModel(&pluginModel);
         rackList.setModel(&rackModel);
         rackList.setRowHeight(kRackRowHeight);
@@ -2478,6 +2492,8 @@ public:
             pluginTitle.setBounds(titleRow);
         }
         searchBox.setBounds(left.removeFromTop(32));
+        left.removeFromTop(6);
+        categoryBox.setBounds(left.removeFromTop(28));
         left.removeFromTop(8);
         pluginPanel = left;
         pluginList.setBounds(left.reduced(6));
@@ -2762,7 +2778,7 @@ private:
 
             g.setColour(Theme::muted());
             g.setFont(juce::FontOptions(12.0f));
-            g.drawText(d.manufacturerName, area.removeFromRight(area.getWidth() * 2 / 5),
+            g.drawText(PluginCategories::of(d) + "  -  " + d.manufacturerName, area.removeFromRight(area.getWidth() * 2 / 5),
                        juce::Justification::centredRight, true);
         }
         void listBoxItemClicked(int row, const juce::MouseEvent& e) override
@@ -2815,8 +2831,12 @@ private:
 
             ++totalEffects;
 
+            const auto cat = PluginCategories::of(t);
+            if (categoryFilter.isNotEmpty() && cat != categoryFilter)
+                continue;
+
             const juce::String haystack = t.name + " " + t.manufacturerName + " "
-                                        + t.category + " " + t.pluginFormatName;
+                                        + t.category + " " + t.pluginFormatName + " " + cat;
             bool matches = true;
             for (const auto& w : words)
                 if (! haystack.containsIgnoreCase(w)) { matches = false; break; }
@@ -2831,7 +2851,7 @@ private:
 
         const int total = totalEffects;
         const int shown = (int) filtered.size();
-        pluginTitle.setText(words.isEmpty() ? "PLUGINS  -  " + juce::String(total)
+        pluginTitle.setText(words.isEmpty() && categoryFilter.isEmpty() ? "PLUGINS  -  " + juce::String(total)
                                             : "PLUGINS  -  " + juce::String(shown) + " of " + juce::String(total),
                             juce::dontSendNotification);
     }
@@ -3067,6 +3087,21 @@ private:
         m.addItem(1, "Add to rack");
         m.addItem(2, pinned ? "Unpin from hot plugins" : "Pin to hot plugins");
         m.addItem(3, "Remove from hot plugins", pinned || hot.getUseCount(id) > 0);
+
+        const auto desc = engine.knownPlugins.getTypeForIdentifierString(id);
+        if (desc != nullptr)
+        {
+            const auto current = PluginCategories::of(*desc);
+            juce::PopupMenu cats;
+            cats.addItem(100, "Automatic", true, ! PluginCategories::isOverridden(*desc));
+            cats.addSeparator();
+            for (int i = 0; i < PluginCategories::all().size(); ++i)
+                cats.addItem(101 + i, PluginCategories::all()[i], true,
+                             PluginCategories::isOverridden(*desc) && current == PluginCategories::all()[i]);
+            m.addSeparator();
+            m.addSubMenu("Type: " + current, cats);
+        }
+
         if (engine.safety.isBlocked(id))
         {
             m.addSeparator();
@@ -3087,6 +3122,15 @@ private:
             else if (r == 2) { safe->hot.togglePin(id); safe->afterHotChanged(); }
             else if (r == 3) { safe->hot.forget(id);    safe->afterHotChanged(); }
             else if (r == 4) { safe->engine.safety.unblock(id); }
+            else if (r >= 100 && r <= 100 + PluginCategories::all().size())
+            {
+                if (auto d = safe->engine.knownPlugins.getTypeForIdentifierString(id))
+                {
+                    PluginCategories::store().cache.erase(id.toStdString());
+                    PluginCategories::setOverride(*d, r == 100 ? juce::String() : PluginCategories::all()[r - 101]);
+                    safe->refresh();
+                }
+            }
         });
     }
 
@@ -4175,6 +4219,8 @@ private:
     juce::String currentShow;
     bool tabsBuilt = false;
     juce::TextEditor searchBox;
+    juce::ComboBox categoryBox;
+    juce::String categoryFilter;
     juce::TextButton scanBtn, audioBtn, hotBtn, loadBtn, bypassAllBtn, clearBtn, inputsBtn, addRackBtn, removeRackBtn, eqBtn, patchBtn, groupsBtn, midiBtn;
     std::array<SnapButton, kNumSnapshots> snapBtns;
     juce::Label snapLabel;
