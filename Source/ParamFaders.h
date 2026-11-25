@@ -7,125 +7,6 @@
 // Parameter faders: pick any parameter of any plugin in the racks and move it with a fader
 // (or a MIDI controller). Shown as a strip at the bottom of the rack screen.
 
-// One fader of the strip.
-class ParamFaderStrip : public juce::Component, private juce::Timer
-{
-public:
-    std::function<void(int)> onAssign;      // open the parameter picker for this fader
-
-    ParamFaderStrip(RackEngine& e, int idx) : engine(e), index(idx)
-    {
-        slider.setSliderStyle(juce::Slider::LinearVertical);
-        slider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-        slider.setRange(0.0, 1.0, 0.0);
-        slider.setDoubleClickReturnValue(false, 0.0);
-        slider.onValueChange = [this]
-        {
-            if (! syncing)
-                engine.setParamFaderValue(index, (float) slider.getValue());
-        };
-        addAndMakeVisible(slider);
-
-        setMouseCursor(juce::MouseCursor::PointingHandCursor);
-        startTimerHz(15);
-        syncNow();
-    }
-
-    void paint(juce::Graphics& g) override
-    {
-        auto b = getLocalBounds().toFloat().reduced(3.0f);
-        g.setColour(Theme::row());
-        g.fillRoundedRectangle(b, 8.0f);
-
-        const auto& pf = engine.getParamFaderInfo(index);
-        const bool on = pf.on;
-        g.setColour(on ? Theme::accent().withAlpha(0.7f) : Theme::outline());
-        g.drawRoundedRectangle(b, 8.0f, 1.0f);
-
-        auto r = getLocalBounds().reduced(8, 6);
-        g.setColour(on ? Theme::text() : Theme::muted());
-        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
-        g.drawText(on ? pf.name : "Fader " + juce::String(index + 1), r.removeFromTop(16),
-                   juce::Justification::centred, true);
-
-        g.setColour(Theme::muted());
-        g.setFont(juce::FontOptions(10.5f));
-        g.drawText(on ? pf.plugin : "click to assign", r.removeFromTop(14), juce::Justification::centred, true);
-
-        g.setColour(on ? Theme::text() : Theme::muted());
-        g.setFont(juce::FontOptions(12.0f));
-        g.drawText(on ? valueText : "-", r.removeFromBottom(16), juce::Justification::centred, true);
-    }
-
-    void resized() override
-    {
-        auto r = getLocalBounds().reduced(8, 6);
-        r.removeFromTop(34);
-        r.removeFromBottom(18);
-        slider.setBounds(r.withSizeKeepingCentre(36, r.getHeight()));
-    }
-
-    void mouseUp(const juce::MouseEvent& e) override
-    {
-        if (slider.getBounds().contains(e.getPosition()))
-            return;
-        if (e.mods.isPopupMenu())
-        {
-            juce::PopupMenu m;
-            m.addItem(1, "Assign parameter...");
-            m.addItem(2, "Clear", engine.getParamFaderInfo(index).on);
-            m.showMenuAsync({}, [this](int r)
-            {
-                if (r == 1 && onAssign) onAssign(index);
-                if (r == 2) engine.clearParamFader(index);
-            });
-        }
-        else if (onAssign)
-            onAssign(index);
-    }
-
-    void syncNow()
-    {
-        const float v = engine.getParamFaderValue(index);
-        const bool usable = v >= 0.0f;
-        slider.setEnabled(usable);
-        slider.setAlpha(usable ? 1.0f : 0.35f);
-
-        juce::String text;
-        if (usable)
-        {
-            if (! slider.isMouseButtonDown())
-            {
-                syncing = true;
-                slider.setValue(v, juce::dontSendNotification);
-                syncing = false;
-            }
-            text = engine.getParamFaderText(index);
-        }
-        else if (engine.getParamFaderInfo(index).on)
-            text = "plugin not found";
-
-        if (text != valueText)
-        {
-            valueText = text;
-            repaint();
-        }
-    }
-
-private:
-    void timerCallback() override
-    {
-        if (isShowing())
-            syncNow();
-    }
-
-    RackEngine& engine;
-    int index;
-    juce::Slider slider;
-    juce::String valueText;
-    bool syncing = false;
-};
-
 //==============================================================================
 // Choose the plugin (from the racks), then one of its parameters.
 class ParamPicker : public juce::Component, private juce::ListBoxModel
@@ -283,57 +164,129 @@ private:
 };
 
 //==============================================================================
-// The strip: a heading and 8 faders (scrolls sideways when there is not enough room).
-class ParamFaderBar : public juce::Component
+// The parameter fader: one fader that follows the last parameter you touched in any plugin's
+// editor (or the one you chose by hand while locked).
+class ParamFaderBar : public juce::Component, private juce::Timer
 {
 public:
-    static constexpr int kHeight = 176;
+    static constexpr int kHeight = 78;
 
     explicit ParamFaderBar(RackEngine& e) : engine(e)
     {
-        for (int i = 0; i < RackEngine::kNumParamFaders; ++i)
+        slider.setSliderStyle(juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider.setRange(0.0, 1.0, 0.0);
+        slider.onValueChange = [this]
         {
-            auto* s = new ParamFaderStrip(engine, i);
-            s->onAssign = [this](int idx) { openPicker(idx); };
-            strips.add(s);
-            content.addAndMakeVisible(s);
-        }
-        viewport.setViewedComponent(&content, false);
-        viewport.setScrollBarsShown(false, true);
-        addAndMakeVisible(viewport);
+            if (! syncing)
+                engine.setParamFaderValue(0, (float) slider.getValue());
+        };
+        addAndMakeVisible(slider);
+
+        lockBtn.setButtonText("Lock");
+        lockBtn.setColour(juce::ToggleButton::textColourId, Theme::text());
+        lockBtn.setTooltip("Locked: the fader stays on its parameter. Unlocked: it jumps to whichever "
+                           "plugin parameter you touch next.");
+        lockBtn.onClick = [this] { engine.setParamFaderLocked(lockBtn.getToggleState()); };
+        addAndMakeVisible(lockBtn);
+
+        chooseBtn.setButtonText("Choose...");
+        chooseBtn.setTooltip("Pick a parameter from a list (this locks the fader to it)");
+        chooseBtn.onClick = [this] { openPicker(); };
+        addAndMakeVisible(chooseBtn);
+
+        startTimerHz(15);
+        refresh();
     }
 
     void paint(juce::Graphics& g) override
     {
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
-        g.drawText("PARAMETER FADERS  -  click one to choose a plugin parameter", 4, 0, getWidth() - 8, 18,
+        g.drawText("PARAMETER FADER  -  follows the last plugin parameter you touch", 4, 0, getWidth() - 8, 18,
                    juce::Justification::centredLeft);
+
+        auto row = getLocalBounds().withTrimmedTop(22).reduced(2);
+        g.setColour(Theme::row());
+        g.fillRoundedRectangle(row.toFloat(), 8.0f);
+
+        const auto& pf = engine.getParamFaderInfo(0);
+        auto text = row.reduced(12, 8).removeFromLeft(nameWidth);
+        g.setColour(pf.on ? Theme::text() : Theme::muted());
+        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.drawText(pf.on ? pf.name : "Nothing selected yet", text.removeFromTop(text.getHeight() / 2),
+                   juce::Justification::centredLeft, true);
+        g.setColour(Theme::muted());
+        g.setFont(juce::FontOptions(11.5f));
+        g.drawText(pf.on ? pf.plugin : "Open a plugin and move one of its controls",
+                   text, juce::Justification::centredLeft, true);
+
+        g.setColour(pf.on ? Theme::text() : Theme::muted());
+        g.setFont(juce::FontOptions(13.0f));
+        g.drawText(pf.on ? valueText : "-", valueArea, juce::Justification::centred, true);
     }
 
     void resized() override
     {
-        auto r = getLocalBounds();
-        r.removeFromTop(20);
-        viewport.setBounds(r);
-
-        const int n = strips.size();
-        const int w = juce::jmax(92, (viewport.getMaximumVisibleWidth()) / n);
-        const int h = viewport.getMaximumVisibleHeight();
-        content.setSize(w * n, h);
-        for (int i = 0; i < n; ++i)
-            strips[i]->setBounds(i * w, 0, w, h);
+        auto row = getLocalBounds().withTrimmedTop(22).reduced(2).reduced(12, 8);
+        nameWidth = juce::jlimit(120, 260, row.getWidth() / 4);
+        row.removeFromLeft(nameWidth + 10);
+        chooseBtn.setBounds(row.removeFromRight(88).reduced(0, 4));
+        row.removeFromRight(8);
+        lockBtn.setBounds(row.removeFromRight(64));
+        row.removeFromRight(8);
+        valueArea = row.removeFromRight(96);
+        slider.setBounds(row);
     }
 
-    void refresh() { for (auto* s : strips) s->syncNow(); repaint(); }
+    void refresh()
+    {
+        lockBtn.setToggleState(engine.isParamFaderLocked(), juce::dontSendNotification);
+        syncNow();
+        repaint();
+    }
 
 private:
-    void openPicker(int index)
+    void syncNow()
     {
-        auto* picker = new ParamPicker(engine, index);
+        const float v = engine.getParamFaderValue(0);
+        const bool usable = v >= 0.0f;
+        slider.setEnabled(usable);
+        slider.setAlpha(usable ? 1.0f : 0.35f);
+
+        juce::String text;
+        if (usable)
+        {
+            if (! slider.isMouseButtonDown())
+            {
+                syncing = true;
+                slider.setValue(v, juce::dontSendNotification);
+                syncing = false;
+            }
+            text = engine.getParamFaderText(0);
+        }
+        else if (engine.getParamFaderInfo(0).on)
+            text = "plugin not found";
+
+        if (text != valueText)
+        {
+            valueText = text;
+            repaint();
+        }
+    }
+
+    void timerCallback() override
+    {
+        if (isShowing())
+            syncNow();
+    }
+
+    void openPicker()
+    {
+        auto* picker = new ParamPicker(engine, 0);
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned(picker);
-        o.dialogTitle = "Parameter fader " + juce::String(index + 1);
+        o.dialogTitle = "Parameter fader";
         o.dialogBackgroundColour = Theme::background();
         o.componentToCentreAround = this;
         o.escapeKeyTriggersCloseButton = true;
@@ -343,7 +296,11 @@ private:
     }
 
     RackEngine& engine;
-    juce::Viewport viewport;
-    juce::Component content;
-    juce::OwnedArray<ParamFaderStrip> strips;
+    juce::Slider slider;
+    juce::ToggleButton lockBtn;
+    juce::TextButton chooseBtn;
+    juce::String valueText;
+    juce::Rectangle<int> valueArea;
+    int nameWidth = 180;
+    bool syncing = false;
 };

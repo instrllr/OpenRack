@@ -2522,7 +2522,7 @@ public:
         eqPanel.setBounds(r);
 
         auto chainArea = r.reduced(10, 8);
-        if (chainArea.getHeight() > 360)
+        if (chainArea.getHeight() > 300)
         {
             paramBar.setBounds(chainArea.removeFromBottom(ParamFaderBar::kHeight));
             chainArea.removeFromBottom(6);

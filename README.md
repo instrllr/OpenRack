@@ -71,4 +71,4 @@ i am simply making this mostly for myself but it is available to anyone who want
 - **Plugins open inside OpenRack** (standalone too): "Edit" shows the plugin in the main window with a Back button, and the window grows to fit it. Plugins running in their own helper process (Isolate plugins) keep a floating window.
 - **Plugin images** on rack rows: captured from the plugin's editor when it can be, or choose your own (right-click a plugin in the rack > Set plugin image).
 - **Plugin types**: plugins are sorted into Reverb, Delay, Distortion, Filter, EQ, Dynamics, Pitch, Modulation, Utility and Other, with a type filter above the plugin list. Right-click a plugin > Type to change it.
-- **Parameter faders**: eight faders on the rack screen, each assignable to any parameter of any plugin in the racks (not for isolated plugins), saved with the show and bindable to MIDI (MIDI view > Parameter faders).
+- **Parameter fader**: one fader on the rack screen that follows the last plugin parameter you touch in any plugin's editor (Lock keeps it on one parameter, Choose... picks from a list), bindable to MIDI (MIDI view > Parameter fader). Not available for isolated plugins.

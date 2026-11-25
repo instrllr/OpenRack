@@ -148,10 +148,38 @@ private:
 class RackEngine : private MidiHost
 {
 public:
+    // Notices which parameter of a plugin you grab in its editor (for the parameter fader).
+    struct ParamWatcher : juce::AudioProcessorParameter::Listener
+    {
+        ParamWatcher(juce::AudioProcessorGraph::Node::Ptr n, std::function<void(juce::AudioProcessor*, int)> cb)
+            : node(std::move(n)), callback(std::move(cb))
+        {
+            for (auto* p : node->getProcessor()->getParameters())
+                p->addListener(this);
+        }
+
+        ~ParamWatcher() override
+        {
+            for (auto* p : node->getProcessor()->getParameters())
+                p->removeListener(this);
+        }
+
+        void parameterValueChanged(int, float) override {}
+        void parameterGestureChanged(int index, bool starting) override
+        {
+            if (starting && callback)
+                callback(node->getProcessor(), index);
+        }
+
+        juce::AudioProcessorGraph::Node::Ptr node;      // keeps the plugin alive until we have unregistered
+        std::function<void(juce::AudioProcessor*, int)> callback;
+    };
+
     struct Slot
     {
         juce::AudioProcessorGraph::Node::Ptr node;
         juce::PluginDescription desc;
+        std::shared_ptr<ParamWatcher> watcher;
     };
 
     // One stereo input bus of the plugin version, with its own mixer strip.
@@ -203,7 +231,7 @@ public:
 
     //--------------------------------------------------------------------------
     // Parameter faders: a fader that moves one parameter of one plugin in a rack.
-    static constexpr int kNumParamFaders = 8;
+    static constexpr int kNumParamFaders = 1;
 
     struct ParamFader
     {
@@ -221,6 +249,31 @@ public:
     };
 
     std::function<void()> onParamFadersChanged;
+
+    // The fader follows the last parameter you touch in any plugin's editor, unless it is locked
+    // (choosing a parameter by hand locks it; unlock to follow again).
+    bool isParamFaderLocked() const { return paramLocked; }
+    void setParamFaderLocked(bool on)
+    {
+        paramLocked = on;
+        markDirty();
+        if (onParamFadersChanged) onParamFadersChanged();
+    }
+
+    void onParamTouched(juce::AudioProcessor* p, int paramIndex)
+    {
+        if (paramLocked)
+            return;
+        for (auto& r : racks)
+            for (size_t k = 0; k < r->slots.size(); ++k)
+                if (r->slots[k].node->getProcessor() == p)
+                {
+                    const auto& pf = paramFaders[0];
+                    if (! (pf.on && pf.rackId == r->id && pf.slot == (int) k && pf.param == paramIndex))
+                        assignParamFader(0, r->id, (int) k, paramIndex, false);
+                    return;
+                }
+    }
 
     const ParamFader& getParamFaderInfo(int i) const { return paramFaders[(size_t) juce::jlimit(0, kNumParamFaders - 1, i)]; }
 
@@ -292,7 +345,7 @@ public:
             p->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, v));
     }
 
-    void assignParamFader(int i, juce::uint32 rackId, int slot, int param)
+    void assignParamFader(int i, juce::uint32 rackId, int slot, int param, bool lock = true)
     {
         auto* proc = getProcessorFor(rackId, slot);
         if (i < 0 || i >= kNumParamFaders || proc == nullptr || param < 0 || param >= proc->getParameters().size())
@@ -306,6 +359,8 @@ public:
         for (auto& r : racks)
             if (r->id == rackId) pf.plugin = r->slots[(size_t) slot].desc.name;
         pf.name = proc->getParameters()[param]->getName(40);
+        if (lock)
+            paramLocked = true;
 
         markDirty();
         if (onParamFadersChanged) onParamFadersChanged();
@@ -1049,6 +1104,7 @@ public:
                 }
 
         auto* pe = root->createNewChildElement("Params");
+        pe->setAttribute("lock", paramLocked);
         for (int i = 0; i < kNumParamFaders; ++i)
         {
             const auto& pf = paramFaders[(size_t) i];
@@ -1269,7 +1325,10 @@ private:
         for (auto& pf : paramFaders)
             pf = ParamFader();
 
+        paramLocked = false;
         if (auto* pe = session.getChildByName("Params"))
+        {
+            paramLocked = pe->getBoolAttribute("lock", false);
             for (auto* e : pe->getChildWithTagNameIterator("P"))
             {
                 const int i = e->getIntAttribute("i", -1);
@@ -1284,6 +1343,7 @@ private:
                 pf.plugin = e->getStringAttribute("plugin");
                 pf.name = e->getStringAttribute("name");
             }
+        }
 
         if (onParamFadersChanged)
             onParamFadersChanged();
@@ -1467,6 +1527,15 @@ private:
             Slot slot;
             slot.node = node;
             slot.desc = d;
+            slot.watcher = std::make_shared<ParamWatcher>(node, [this, alive](juce::AudioProcessor* p, int idx)
+            {
+                // Called from whichever thread the plugin reports the gesture on.
+                juce::MessageManager::callAsync([this, alive, p, idx]
+                {
+                    if (! alive.expired())
+                        onParamTouched(p, idx);
+                });
+            });
             rack->slots.insert(rack->slots.begin() + pos, slot);
 
             rebuildConnections();
@@ -1722,6 +1791,7 @@ private:
     std::atomic<bool> isolatePlugins { false };
     TempoPlayHead tempoHead;
     ParamFader paramFaders[kNumParamFaders];
+    bool paramLocked = false;
     std::atomic<int> dropouts { 0 };
     std::atomic<float> peakLoad { 0.0f };
     int shownDropouts = 0, lastXruns = -1, missingTicks = 0, midiTicks = 0;
