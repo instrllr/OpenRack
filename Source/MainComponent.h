@@ -356,7 +356,7 @@ public:
         addAndMakeVisible(title);
 
         viewport.setViewedComponent(&holder, false);
-        viewport.setScrollBarsShown(true, true);
+        viewport.setScrollBarsShown(false, false);      // never scrolled: a plugin that does not fit gets its own window
         addAndMakeVisible(viewport);
     }
 
@@ -415,6 +415,14 @@ public:
         g.fillRoundedRectangle(p, 10.0f);
         g.setColour(Theme::outline());
         g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
+    }
+
+    // True when the plugin is bigger than the room it has been given.
+    bool tooBig() const
+    {
+        return editor != nullptr && viewport.getWidth() > 0
+               && (editor->getWidth() + 16 > viewport.getMaximumVisibleWidth()
+                   || editor->getHeight() + 16 > viewport.getMaximumVisibleHeight());
     }
 
     void resized() override
@@ -2424,11 +2432,17 @@ public:
         inputsPanel.setBounds(hotStrip.getX(), hotStrip.getY(), hotStrip.getWidth(),
                               r.getBottom() - hotStrip.getY());
 
-        tabViewport.setBounds(r.removeFromLeft(108));
-        r.removeFromLeft(12);
-        layoutTabs();
+        // The rack tabs step aside while a plugin is open, to leave more room for it.
+        tabViewport.setVisible(! editing);
+        if (! editing)
+        {
+            tabViewport.setBounds(r.removeFromLeft(108));
+            r.removeFromLeft(12);
+            layoutTabs();
+        }
 
-        auto racksCol = r.removeFromRight(juce::jlimit(200, 260, r.getWidth() / 4));
+        auto racksCol = r.removeFromRight(editing ? juce::jlimit(180, 210, r.getWidth() / 6)
+                                                  : juce::jlimit(200, 260, r.getWidth() / 4));
         r.removeFromRight(16);
 
         // While a plugin is open, the plugin library gives way to the rack's chain (like a hardware
@@ -2436,7 +2450,7 @@ public:
         juce::Rectangle<int> chainCol;
         if (editing)
         {
-            chainCol = r.removeFromLeft(juce::jlimit(280, 340, r.getWidth() / 4));
+            chainCol = r.removeFromLeft(juce::jlimit(250, 300, r.getWidth() / 5));
             r.removeFromLeft(16);
             pluginPanel = {};
         }
@@ -3934,6 +3948,21 @@ private:
         editorHost.setVisible(true);
         resized();                                  // makes room: the chain moves left, the plugin goes in the middle
         editorHost.show(*slot.node->getProcessor(), slot.desc.name, slot.desc.createIdentifierString());
+        resized();
+
+        // Not enough room even after the window has grown as far as the screen allows: give the plugin
+        // its own window rather than let it spill over the rest of the interface.
+        // (Checked a moment later, once the window has finished resizing.)
+        const auto uid = inlineNode;
+        juce::Component::SafePointer<MainComponent> safe(this);
+        juce::Timer::callAfterDelay(350, [safe, row, uid]
+        {
+            if (safe != nullptr && safe->inlineNode == uid && safe->editorHost.isVisible() && safe->editorHost.tooBig())
+            {
+                safe->closeInlineEditor(true);
+                safe->engine.openEditor(row, true);
+            }
+        });
         repaint();
     }
 

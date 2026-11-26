@@ -950,7 +950,7 @@ public:
         notify();
     }
 
-    void openEditor(int i)
+    void openEditor(int i, bool forceFloating = false)
     {
         if (i < 0 || i >= getNumSlots()) return;
 
@@ -981,7 +981,7 @@ public:
 
         // The editor is shown inside OpenRack's own window. (A plugin running in a separate helper
         // process has its window in that process, so that one stays a floating window.)
-        if (onOpenEditorRequested && rp == nullptr)
+        if (onOpenEditorRequested && rp == nullptr && ! forceFloating)
         {
             onOpenEditorRequested(i);
             return;
