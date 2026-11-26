@@ -188,6 +188,39 @@ jobs:
           Get-Content hosttest.txt
           if ($p.ExitCode -ne 0) { exit 1 }
 
+      - name: Launch smoke test (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          BIN=$(find build/OpenRack_artefacts -type f -name OpenRack | head -1)
+          xvfb-run -a bash -c "\"$BIN\" > launch.txt 2>&1 & PID=\$!; sleep 10; if kill -0 \$PID 2>/dev/null; then echo 'LAUNCH: ALIVE after 10s'; kill \$PID; else wait \$PID; echo \"LAUNCH: CRASHED exit=\$?\"; fi" | tee launch-result.txt
+          cat launch.txt | tail -40
+          grep -q "LAUNCH: ALIVE" launch-result.txt
+
+      - name: Launch smoke test (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          BIN=$(find build/OpenRack_artefacts -maxdepth 5 -type f -path "*OpenRack.app/Contents/MacOS/OpenRack" | head -1)
+          "$BIN" > launch.txt 2>&1 &
+          PID=$!
+          sleep 12
+          if kill -0 $PID 2>/dev/null; then echo "LAUNCH: ALIVE after 12s"; kill $PID; RES=0; else wait $PID; echo "LAUNCH: CRASHED exit=$?"; RES=1; fi
+          tail -40 launch.txt
+          for f in ~/Library/Logs/DiagnosticReports/OpenRack*; do [ -f "$f" ] && { echo "== $f"; head -120 "$f"; }; done
+          exit $RES
+
+      - name: Launch smoke test (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build/OpenRack_artefacts -Recurse -Filter OpenRack.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) { Write-Host "LAUNCH: CRASHED exit=$($p.ExitCode)"; exit 1 }
+          Write-Host "LAUNCH: ALIVE after 12s"; $p.Kill()
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
