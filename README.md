@@ -67,7 +67,7 @@ i am simply making this mostly for myself but it is available to anyone who want
 - **Dropout monitoring**: the status bar shows peak CPU and a dropout counter (late/overlong audio callbacks and driver xruns); double-click it to reset.
 - **Device reconnection**: if the audio interface or MIDI controller is unplugged, OpenRack waits and reopens it automatically when it returns.
 - **OpenRack Virtual Audio (macOS)**: a 16-channel loopback Core Audio device. Install `OpenRack-Driver-macOS.pkg`, then play any app to it and pick it as OpenRack's audio input. See `Driver/`.
-- **Start-up splash** (standalone): a 10-second intro film plays at launch on macOS and Windows (built-in animation elsewhere). It fades in and out over the whole window.
+- **Start-up splash** (standalone): a 4-second intro film (stored as frames in `Resources/splash.frames` and drawn by OpenRack itself, on every platform) that fades in and out and dissolves into the app.
 - **Plugins open inside OpenRack** (standalone too): "Edit" shows the plugin in the main window with a Back button, and the window grows to fit it. Plugins running in their own helper process (Isolate plugins) keep a floating window.
 - **Plugin images** on rack rows: captured from the plugin's editor when it can be, or choose your own (right-click a plugin in the rack > Set plugin image).
 - **Plugin types**: plugins are sorted into Reverb, Delay, Distortion, Filter, EQ, Dynamics, Pitch, Modulation, Utility and Other, with a type filter above the plugin list. Right-click a plugin > Type to change it.

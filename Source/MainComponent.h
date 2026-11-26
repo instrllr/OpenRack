@@ -7,8 +7,7 @@
 #include "PluginImages.h"
 #include "PluginCategories.h"
 #include "ParamFaders.h"
-#if OPENRACK_SPLASH_VIDEO
- #include <juce_video/juce_video.h>
+#if OPENRACK_SPLASH_FRAMES
  #include "SplashData.h"
 #endif
 
@@ -1792,165 +1791,85 @@ private:
 
 //==============================================================================
 //==============================================================================
-// Short start-up animation: the accent bar grows, the name slides in, a light sweeps across, then
-// the whole thing fades away. Click (or press any key) to skip.
+// Start-up film: a short clip stored as a numbered set of JPEG frames and drawn by OpenRack itself
+// (no system video player involved). It fades in, plays, fades out and then dissolves away to reveal
+// the application.
 class SplashOverlay : public juce::Component, private juce::Timer
 {
 public:
-    // Pass an image to show your own splash screen instead of the built-in animation.
     SplashOverlay()
     {
-        setInterceptsMouseClicks(true, false);
+        setInterceptsMouseClicks(true, false);   // block clicks while it is up
         start = juce::Time::getMillisecondCounterHiRes();
-#if OPENRACK_SPLASH_VIDEO
-        startVideo();
+#if OPENRACK_SPLASH_FRAMES
+        data = reinterpret_cast<const juce::uint8*>(SplashData::splash_frames);
+        const auto size = (size_t) SplashData::splash_framesSize;
+        if (size > 8)
+        {
+            memcpy(&count, data, 4);
+            if (count > 0 && size >= 4u + 4u * ((size_t) count + 1u))
+                offsets = reinterpret_cast<const juce::uint8*>(data + 4);
+            else
+                count = 0;
+        }
 #endif
         startTimerHz(60);
     }
 
     std::function<void()> onFinished;
 
-    void mouseDown(const juce::MouseEvent&) override { if (video == nullptr) skip(); }
-
-    void resized() override
-    {
-#if OPENRACK_SPLASH_VIDEO
-        if (video != nullptr)
-        {
-            video->setBounds(getLocalBounds());       // the film covers the whole application
-        }
-#endif
-    }
-
     void paint(juce::Graphics& g) override
     {
-        if (video != nullptr)
-        {
-            // The film fades itself in from / out to this colour; once it ends, this layer fades
-            // away to reveal the application.
-            g.fillAll(juce::Colour(0xff101018).withAlpha(coverAlpha));
-            return;
-        }
+        const float t = elapsed();
+        const float filmLength = (float) count / kFps;
+        const float cover = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - filmLength) / kReveal));
 
-        const float t = elapsed();                       // seconds
-        const float total = duration();
-        const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - (total - 0.5f)) / 0.5f));
-        const float cx = (float) getWidth() * 0.5f, cy = (float) getHeight() * 0.5f;
-
-        if (image.isValid())
-        {
-            g.setColour(Theme::background().withAlpha(fadeOut));
-            g.fillAll();
-            const float inP = ease(juce::jlimit(0.0f, 1.0f, t / 0.4f));
-            g.setOpacity(inP * fadeOut);
-            const auto area = getLocalBounds().toFloat().reduced((float) getWidth() * 0.08f, (float) getHeight() * 0.08f);
-            g.drawImage(image, area, juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
-            return;
-        }
-
-        g.setColour(Theme::background().withAlpha(fadeOut));
+        g.setColour(juce::Colour(0xff101010).withAlpha(cover));
         g.fillAll();
 
-        const float barP = ease(juce::jlimit(0.0f, 1.0f, t / 0.45f));
-        const float textP = ease(juce::jlimit(0.0f, 1.0f, (t - 0.15f) / 0.5f));
-        const float subP = ease(juce::jlimit(0.0f, 1.0f, (t - 0.45f) / 0.45f));
+        if (count <= 0 || t >= filmLength)
+            return;
 
-        // Soft glow behind the logo
-        g.setGradientFill(juce::ColourGradient(Theme::accent().withAlpha(0.18f * barP * fadeOut), cx, cy,
-                                               Theme::accent().withAlpha(0.0f), cx + 320.0f, cy, true));
-        g.fillEllipse(cx - 320.0f, cy - 320.0f, 640.0f, 640.0f);
+        const int index = juce::jlimit(0, count - 1, (int) (t * kFps));
+        if (index != shownIndex)
+        {
+            shownIndex = index;
+            frame = decode(index);
+        }
+        if (! frame.isValid())
+            return;
 
-        // Accent bar (grows from the middle)
-        const float barH = 54.0f * barP;
-        g.setColour(Theme::accent().withAlpha(fadeOut));
-        g.fillRoundedRectangle(cx - 150.0f, cy - barH * 0.5f, 9.0f, barH, 4.5f);
-
-        // Name
-        g.setColour(Theme::text().withAlpha(textP * fadeOut));
-        g.setFont(juce::FontOptions(54.0f, juce::Font::bold));
-        g.drawText("OpenRack", juce::Rectangle<float>(cx - 128.0f + (1.0f - textP) * 24.0f, cy - 34.0f, 320.0f, 68.0f),
-                   juce::Justification::centredLeft);
-
-        g.setColour(Theme::muted().withAlpha(subP * fadeOut));
-        g.setFont(juce::FontOptions(16.0f));
-        g.drawText("live plugin host", juce::Rectangle<float>(cx - 124.0f, cy + 36.0f + (1.0f - subP) * 8.0f, 320.0f, 24.0f),
-                   juce::Justification::centredLeft);
-
-        // Light sweeping along a thin line
-        const float lineY = cy + 86.0f;
-        const float half = 170.0f;
-        g.setColour(Theme::outline().withAlpha(0.8f * subP * fadeOut));
-        g.fillRect(cx - half, lineY, half * 2.0f, 1.5f);
-        const float sweep = juce::jlimit(0.0f, 1.0f, (t - 0.5f) / 1.0f);
-        const float sx = cx - half + 2.0f * half * ease(sweep);
-        g.setGradientFill(juce::ColourGradient(Theme::accent().withAlpha(0.0f), sx - 60.0f, lineY,
-                                               Theme::accent().withAlpha(0.95f * fadeOut), sx, lineY, false));
-        g.fillRect(juce::Rectangle<float>(juce::jmax(cx - half, sx - 60.0f), lineY - 0.5f,
-                                          juce::jmin(60.0f, sx - (cx - half)), 2.5f));
+        const float fadeIn = ease(juce::jlimit(0.0f, 1.0f, t / 0.8f));
+        const float fadeOut = 1.0f - ease(juce::jlimit(0.0f, 1.0f, (t - (filmLength - 1.0f)) / 1.0f));
+        g.setOpacity(juce::jmin(fadeIn, fadeOut));
+        g.drawImage(frame, getLocalBounds().toFloat(), juce::RectanglePlacement::centred);
     }
 
 private:
-    float duration() const { return video != nullptr ? 6.0f : (image.isValid() ? 2.6f : 2.0f); }
-    float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
+    static constexpr float kFps = 30.0f;
+    static constexpr float kReveal = 0.5f;      // seconds the dark cover takes to dissolve at the end
+
     static float ease(float x) { return 1.0f - (1.0f - x) * (1.0f - x) * (1.0f - x); }
+    float elapsed() const { return (float) ((juce::Time::getMillisecondCounterHiRes() - start) / 1000.0); }
 
-    void skip()
+    juce::Image decode(int index) const
     {
-        start -= 3000.0;
-        timerCallback();
-    }
-
-#if OPENRACK_SPLASH_VIDEO
-    void startVideo()
-    {
-        // The film is compiled into the app; the system player needs a real file, so unpack it once.
-        const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                              .getChildFile("OpenRack-splash-" + juce::String(SplashData::splash_mp4Size) + ".mp4");
-        if (! file.existsAsFile() || file.getSize() != (juce::int64) SplashData::splash_mp4Size)
-            if (! file.replaceWithData(SplashData::splash_mp4, (size_t) SplashData::splash_mp4Size))
-                return;
-
-        auto v = std::make_unique<juce::VideoComponent>(false);
-        if (v->load(file).failed())
-            return;
-
-        v->onPlaybackStopped = [this] { finished = true; };
-        v->onErrorOccurred = [this](const juce::String&) { finished = true; };
-        video = std::move(v);
-        addAndMakeVisible(*video);
-        video->setInterceptsMouseClicks(false, false);
-        video->play();
-    }
+#if OPENRACK_SPLASH_FRAMES
+        juce::uint32 from = 0, to = 0;
+        memcpy(&from, offsets + 4 * index, 4);
+        memcpy(&to, offsets + 4 * (index + 1), 4);
+        if (to > from && (size_t) to <= (size_t) SplashData::splash_framesSize)
+            return juce::ImageFileFormat::loadFrom(data + from, (size_t) (to - from));
+#else
+        juce::ignoreUnused(index);
 #endif
+        return {};
+    }
 
     void timerCallback() override
     {
-#if OPENRACK_SPLASH_VIDEO
-        if (video != nullptr)
-        {
-            if (fadeStart == 0.0 && (finished || elapsed() >= duration()))
-            {
-                video->stop();
-                video->setVisible(false);              // the last frame is already the cover colour
-                fadeStart = juce::Time::getMillisecondCounterHiRes();
-            }
-            if (fadeStart != 0.0)
-            {
-                const float p = (float) ((juce::Time::getMillisecondCounterHiRes() - fadeStart) / 600.0);
-                coverAlpha = 1.0f - juce::jlimit(0.0f, 1.0f, p);
-                repaint();
-                if (p < 1.0f)
-                    return;
-                stopTimer();
-                setVisible(false);
-                if (onFinished)
-                    juce::MessageManager::callAsync(onFinished);
-            }
-            return;
-        }
-#endif
-
-        if (elapsed() >= duration())
+        const float end = (float) count / kFps + kReveal;
+        if (elapsed() >= end)
         {
             stopTimer();
             setVisible(false);
@@ -1958,19 +1877,14 @@ private:
                 juce::MessageManager::callAsync(onFinished);
             return;
         }
-        if (video == nullptr)
-            repaint();
+        repaint();
     }
 
-#if OPENRACK_SPLASH_VIDEO
-    std::unique_ptr<juce::VideoComponent> video;
-#else
-    std::unique_ptr<juce::Component> video;     // never set on platforms without video support
-#endif
-    bool finished = false;
-    double fadeStart = 0.0;
-    float coverAlpha = 1.0f;
-    juce::Image image;
+    int count = 0;
+    int shownIndex = -1;
+    const juce::uint8* data = nullptr;
+    const juce::uint8* offsets = nullptr;
+    juce::Image frame;
     double start = 0.0;
 };
 
