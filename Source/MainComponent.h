@@ -343,17 +343,21 @@ class InlineEditorHost : public juce::Component,
 {
 public:
     std::function<void()> onBack;
-    std::function<void(int, int)> onWantedSize;   // window size the editor needs
+    std::function<void(int, int)> onWantedExtra;   // how many more pixels (width, height) the editor would like
 
     InlineEditorHost()
     {
-        backBtn.setButtonText("< Back to rack");
+        backBtn.setButtonText("Close editor");
         backBtn.onClick = [this] { if (onBack) onBack(); };
         addAndMakeVisible(backBtn);
 
-        title.setFont(juce::Font(juce::FontOptions(16.0f, juce::Font::bold)));
+        title.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, Theme::text());
         addAndMakeVisible(title);
+
+        viewport.setViewedComponent(&holder, false);
+        viewport.setScrollBarsShown(true, true);
+        addAndMakeVisible(viewport);
     }
 
     ~InlineEditorHost() override { clear(); }
@@ -371,7 +375,7 @@ public:
 
         editor.reset(ed);
         title.setText(name, juce::dontSendNotification);
-        addAndMakeVisible(*editor);
+        holder.addAndMakeVisible(*editor);
         editor->addComponentListener(this);
 
         layoutEditor();
@@ -397,37 +401,61 @@ public:
         if (editor != nullptr)
         {
             editor->removeComponentListener(this);
-            removeChildComponent(editor.get());
+            holder.removeChildComponent(editor.get());
             editor.reset();
         }
     }
 
-    void paint(juce::Graphics& g) override { g.fillAll(Theme::background()); }
+    void paint(juce::Graphics& g) override
+    {
+        // A panel like the others in the window, with the editor sitting centred inside it.
+        auto p = getLocalBounds().toFloat();
+        g.setGradientFill(juce::ColourGradient(Theme::panel().brighter(0.06f), 0.0f, p.getY(),
+                                               Theme::panel(), 0.0f, p.getBottom(), false));
+        g.fillRoundedRectangle(p, 10.0f);
+        g.setColour(Theme::outline());
+        g.drawRoundedRectangle(p.reduced(0.5f), 10.0f, 1.0f);
+    }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(16);
-        auto top = r.removeFromTop(36);
-        backBtn.setBounds(top.removeFromLeft(140));
-        title.setBounds(top.reduced(14, 0));
-        r.removeFromTop(12);
-        area = r;
+        auto r = getLocalBounds().reduced(10, 8);
+        auto top = r.removeFromTop(30);
+        backBtn.setBounds(top.removeFromRight(110));
+        title.setBounds(top.reduced(4, 0));
+        r.removeFromTop(6);
+        viewport.setBounds(r);
         layoutEditor();
+        notifyWantedSize();
     }
 
 private:
     juce::String imageKey;
 
+    // The editor is centred, both ways, in whatever room there is; when there is not enough room
+    // it scrolls.
     void layoutEditor()
     {
+        const int vw = viewport.getMaximumVisibleWidth();
+        const int vh = viewport.getMaximumVisibleHeight();
+        const int ew = editor != nullptr ? editor->getWidth() : 0;
+        const int eh = editor != nullptr ? editor->getHeight() : 0;
+        const int hw = juce::jmax(vw, ew + 16);
+        const int hh = juce::jmax(vh, eh + 16);
+        if (holder.getWidth() != hw || holder.getHeight() != hh)
+            holder.setSize(hw, hh);
         if (editor != nullptr)
-            editor->setTopLeftPosition(juce::jmax(0, area.getCentreX() - editor->getWidth() / 2), area.getY());
+            editor->setTopLeftPosition((hw - ew) / 2, (hh - eh) / 2);
     }
 
     void notifyWantedSize()
     {
-        if (editor != nullptr && onWantedSize)
-            onWantedSize(editor->getWidth() + 32, editor->getHeight() + 32 + 36 + 12);
+        if (editor == nullptr || ! onWantedExtra || viewport.getWidth() <= 0)
+            return;
+        const int dw = editor->getWidth() + 16 - viewport.getMaximumVisibleWidth();
+        const int dh = editor->getHeight() + 16 - viewport.getMaximumVisibleHeight();
+        if (dw > 0 || dh > 0)
+            onWantedExtra(juce::jmax(0, dw), juce::jmax(0, dh));
     }
 
     void componentMovedOrResized(juce::Component&, bool, bool wasResized) override
@@ -441,7 +469,8 @@ private:
 
     juce::TextButton backBtn;
     juce::Label title;
-    juce::Rectangle<int> area;
+    juce::Viewport viewport;
+    juce::Component holder;
     std::unique_ptr<juce::AudioProcessorEditor> editor;
 };
 
@@ -2175,10 +2204,11 @@ public:
         addChildComponent(editorHost);
         editorHost.onBack = [this] { closeInlineEditor(true); };
         editorHost.onImageChanged = [this] { rackList.repaint(); };
-        editorHost.onWantedSize = [this](int w, int h)
+        editorHost.onWantedExtra = [this](int dw, int dh)
         {
+            // Grow the window just enough for the editor (it is put back when the editor closes).
             if (onRequestSize)
-                onRequestSize(juce::jmax(1180, w), juce::jmax(720, h));
+                onRequestSize(getWidth() + dw, getHeight() + dh);
         };
         engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
         engine.onBeforeSlotRemoved = [this](juce::uint32 uid)
@@ -2355,10 +2385,10 @@ public:
 
     void resized() override
     {
-        editorHost.setBounds(getLocalBounds());
         if (splash != nullptr)
             splash->setBounds(getLocalBounds());
 
+        const bool editing = editorHost.isVisible();
         auto r = getLocalBounds().reduced(16);
 
         auto top = r.removeFromTop(40);
@@ -2401,20 +2431,37 @@ public:
         auto racksCol = r.removeFromRight(juce::jlimit(200, 260, r.getWidth() / 4));
         r.removeFromRight(16);
 
-        auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
-        r.removeFromLeft(16);
-
+        // While a plugin is open, the plugin library gives way to the rack's chain (like a hardware
+        // rack: the chain on one side, the open plugin in the middle).
+        juce::Rectangle<int> chainCol;
+        if (editing)
         {
-            auto titleRow = left.removeFromTop(24);
-            isolateBtn.setBounds(titleRow.removeFromRight(180));
-            pluginTitle.setBounds(titleRow);
+            chainCol = r.removeFromLeft(juce::jlimit(280, 340, r.getWidth() / 4));
+            r.removeFromLeft(16);
+            pluginPanel = {};
         }
-        searchBox.setBounds(left.removeFromTop(32));
-        left.removeFromTop(6);
-        categoryBox.setBounds(left.removeFromTop(28));
-        left.removeFromTop(8);
-        pluginPanel = left;
-        pluginList.setBounds(left.reduced(6));
+        else
+        {
+            auto left = r.removeFromLeft(r.getWidth() * 2 / 5);
+            r.removeFromLeft(16);
+
+            {
+                auto titleRow = left.removeFromTop(24);
+                isolateBtn.setBounds(titleRow.removeFromRight(180));
+                pluginTitle.setBounds(titleRow);
+            }
+            searchBox.setBounds(left.removeFromTop(32));
+            left.removeFromTop(6);
+            categoryBox.setBounds(left.removeFromTop(28));
+            left.removeFromTop(8);
+            pluginPanel = left;
+            pluginList.setBounds(left.reduced(6));
+        }
+        pluginTitle.setVisible(! editing);
+        isolateBtn.setVisible(! editing && engine.ownsAudioDevice());
+        searchBox.setVisible(! editing);
+        categoryBox.setVisible(! editing);
+        pluginList.setVisible(! editing);
 
         rackTitle.setBounds(r.removeFromTop(24));
         auto actions = r.removeFromTop(32);
@@ -2432,18 +2479,36 @@ public:
             actions.removeFromLeft(3);
         }
         r.removeFromTop(8);
-        rackPanel = r;
-        eqPanel.setBounds(r);
-
-        auto chainArea = r.reduced(10, 8);
-        if (chainArea.getHeight() > 300)
+        juce::Rectangle<int> chainArea;
+        if (editing)
         {
-            paramBar.setBounds(chainArea.removeFromBottom(ParamFaderBar::kHeight));
-            chainArea.removeFromBottom(6);
-            paramBar.setVisible(true);
+            rackPanel = chainCol;
+            chainArea = chainCol.reduced(10, 8);
+            auto editArea = r;
+            if (editArea.getHeight() > 340)
+            {
+                paramBar.setBounds(editArea.removeFromBottom(ParamFaderBar::kHeight));
+                editArea.removeFromBottom(6);
+                paramBar.setVisible(true);
+            }
+            else
+                paramBar.setVisible(false);
+            editorHost.setBounds(editArea);
         }
         else
-            paramBar.setVisible(false);
+        {
+            rackPanel = r;
+            chainArea = r.reduced(10, 8);
+            if (chainArea.getHeight() > 300)
+            {
+                paramBar.setBounds(chainArea.removeFromBottom(ParamFaderBar::kHeight));
+                chainArea.removeFromBottom(6);
+                paramBar.setVisible(true);
+            }
+            else
+                paramBar.setVisible(false);
+        }
+        eqPanel.setBounds(rackPanel);
         auto patchRow = chainArea.removeFromTop(28);
         inLabel.setBounds(patchRow.removeFromLeft(24));
         inCombo.setBounds(patchRow.removeFromLeft((patchRow.getWidth() - 40) / 2));
@@ -2492,7 +2557,7 @@ public:
     // Drag and drop: plugins (from the list or hot strip) and rack rows
     bool isInterestedInDragSource(const SourceDetails& d) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
+        if (inputsPanel.isVisible() || eqPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
             return false;
         const auto s = d.description.toString();
         return s.startsWith("add:") || s.startsWith("move:");
@@ -3866,10 +3931,10 @@ private:
 
         auto& slot = engine.getSlot(row);
         inlineNode = slot.node->nodeID.uid;
-        editorHost.setBounds(getLocalBounds());
-        editorHost.show(*slot.node->getProcessor(), slot.desc.name, slot.desc.createIdentifierString());
         editorHost.setVisible(true);
-        editorHost.toFront(false);
+        resized();                                  // makes room: the chain moves left, the plugin goes in the middle
+        editorHost.show(*slot.node->getProcessor(), slot.desc.name, slot.desc.createIdentifierString());
+        repaint();
     }
 
     // restoreSize: put the window back to its size from before the editor opened.
@@ -3916,6 +3981,7 @@ private:
         editorHost.clear();
         editorHost.setVisible(false);
         inlineNode = 0;
+        resized();
         repaint();
 
         if (wasOpen && restoreSize && onRequestSize)
