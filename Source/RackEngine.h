@@ -957,6 +957,21 @@ public:
         auto node = cur().slots[(size_t) i].node;
         auto uid = node->nodeID.uid;
 
+        // From now on, grabbing a control in this plugin's editor selects it for the parameter fader.
+        // (Attached when an editor is opened rather than when a plugin loads, so loading stays untouched.)
+        if (cur().slots[(size_t) i].watcher == nullptr && dynamic_cast<remote::RemotePlugin*>(node->getProcessor()) == nullptr)
+        {
+            std::weak_ptr<int> alive = aliveToken;
+            cur().slots[(size_t) i].watcher = std::make_shared<ParamWatcher>(node, [this, alive](juce::AudioProcessor* p, int idx)
+            {
+                juce::MessageManager::callAsync([this, alive, p, idx]
+                {
+                    if (! alive.expired())
+                        onParamTouched(p, idx);
+                });
+            });
+        }
+
         auto* rp = dynamic_cast<remote::RemotePlugin*>(node->getProcessor());
         if (rp != nullptr && rp->getState() == remote::RemotePlugin::State::failed)
         {
@@ -1527,15 +1542,6 @@ private:
             Slot slot;
             slot.node = node;
             slot.desc = d;
-            slot.watcher = std::make_shared<ParamWatcher>(node, [this, alive](juce::AudioProcessor* p, int idx)
-            {
-                // Called from whichever thread the plugin reports the gesture on.
-                juce::MessageManager::callAsync([this, alive, p, idx]
-                {
-                    if (! alive.expired())
-                        onParamTouched(p, idx);
-                });
-            });
             rack->slots.insert(rack->slots.begin() + pos, slot);
 
             rebuildConnections();
