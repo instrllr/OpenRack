@@ -189,11 +189,12 @@ public:
     {
         const bool bypassed = bypass.getToggleState();
         const auto thumb = PluginImages::get(imageId);
+        const bool narrow = getWidth() < 420;       // in the chain column beside an open plugin
         int textX = 66;
         if (thumb.isValid())
         {
-            const float boxH = (float) getHeight() - 16.0f;
-            const float boxW = juce::jmin(112.0f, boxH * 1.6f);
+            const float boxH = narrow ? 34.0f : (float) getHeight() - 16.0f;
+            const float boxW = narrow ? 54.0f : juce::jmin(112.0f, boxH * 1.6f);
             const auto box = juce::Rectangle<float>(66.0f, 8.0f, boxW, boxH);
             g.setColour(Theme::control());
             g.fillRoundedRectangle(box, 5.0f);
@@ -208,7 +209,7 @@ public:
             g.drawRoundedRectangle(box, 5.0f, 1.0f);
             textX = 66 + (int) boxW + 12;
         }
-        const int textW = juce::jmax(40, edit.getX() - textX - 8);
+        const int textW = narrow ? juce::jmax(40, getWidth() - textX - 8) : juce::jmax(40, edit.getX() - textX - 8);
         const float cy = (float) getHeight() * 0.5f;
 
         // Drag grip
@@ -229,16 +230,37 @@ public:
 
         g.setColour(bypassed ? Theme::muted() : Theme::text());
         g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-        g.drawText(name, textX, 7, textW, getHeight() / 2 - 5, juce::Justification::centredLeft, true);
+        if (narrow)
+            g.drawText(name, textX, 5, textW, 20, juce::Justification::centredLeft, true);
+        else
+            g.drawText(name, textX, 7, textW, getHeight() / 2 - 5, juce::Justification::centredLeft, true);
 
         g.setColour(Theme::muted());
         g.setFont(juce::FontOptions(12.0f));
-        g.drawText(details, textX, getHeight() / 2, textW, getHeight() / 2 - 7,
-                   juce::Justification::centredLeft, true);
+        if (narrow)
+            g.drawText(details, textX, 25, textW, 16, juce::Justification::centredLeft, true);
+        else
+            g.drawText(details, textX, getHeight() / 2, textW, getHeight() / 2 - 7,
+                       juce::Justification::centredLeft, true);
     }
 
     void resized() override
     {
+        if (getWidth() < 420)
+        {
+            auto r = juce::Rectangle<int>(66, getHeight() - 28, getWidth() - 66 - 8, 22);
+            remove.setBounds(r.removeFromRight(26));
+            r.removeFromRight(3);
+            down.setBounds(r.removeFromRight(26));
+            r.removeFromRight(3);
+            up.setBounds(r.removeFromRight(26));
+            r.removeFromRight(8);
+            bypass.setBounds(r.removeFromRight(62));
+            r.removeFromRight(3);
+            edit.setBounds(r.removeFromRight(46));
+            return;
+        }
+
         auto r = getLocalBounds().reduced(8, 0).withSizeKeepingCentre(getWidth() - 16, 30);
         remove.setBounds(r.removeFromRight(28));
         r.removeFromRight(4);
@@ -343,7 +365,7 @@ class InlineEditorHost : public juce::Component,
 {
 public:
     std::function<void()> onBack;
-    std::function<void(int, int)> onWantedExtra;   // how many more pixels (width, height) the editor would like
+    std::function<void()> onDoesNotFit;            // the plugin is bigger than the room it has
 
     InlineEditorHost()
     {
@@ -379,7 +401,6 @@ public:
         editor->addComponentListener(this);
 
         layoutEditor();
-        notifyWantedSize();
 
         // Once the editor has drawn itself, keep a picture of it for the rack row.
         juce::Component::SafePointer<InlineEditorHost> safe(this);
@@ -434,7 +455,8 @@ public:
         r.removeFromTop(6);
         viewport.setBounds(r);
         layoutEditor();
-        notifyWantedSize();
+        if (tooBig() && onDoesNotFit)
+            onDoesNotFit();
     }
 
 private:
@@ -456,22 +478,13 @@ private:
             editor->setTopLeftPosition((hw - ew) / 2, (hh - eh) / 2);
     }
 
-    void notifyWantedSize()
-    {
-        if (editor == nullptr || ! onWantedExtra || viewport.getWidth() <= 0)
-            return;
-        const int dw = editor->getWidth() + 16 - viewport.getMaximumVisibleWidth();
-        const int dh = editor->getHeight() + 16 - viewport.getMaximumVisibleHeight();
-        if (dw > 0 || dh > 0)
-            onWantedExtra(juce::jmax(0, dw), juce::jmax(0, dh));
-    }
-
     void componentMovedOrResized(juce::Component&, bool, bool wasResized) override
     {
         if (wasResized)
         {
             layoutEditor();
-            notifyWantedSize();
+            if (tooBig() && onDoesNotFit)
+                onDoesNotFit();
         }
     }
 
@@ -2212,11 +2225,10 @@ public:
         addChildComponent(editorHost);
         editorHost.onBack = [this] { closeInlineEditor(true); };
         editorHost.onImageChanged = [this] { rackList.repaint(); };
-        editorHost.onWantedExtra = [this](int dw, int dh)
+        editorHost.onDoesNotFit = [this]
         {
-            // Grow the window just enough for the editor (it is put back when the editor closes).
-            if (onRequestSize)
-                onRequestSize(getWidth() + dw, getHeight() + dh);
+            juce::Component::SafePointer<MainComponent> safe(this);
+            juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->ensureEditorFits(); });
         };
         engine.onOpenEditorRequested = [this](int i) { showInlineEditor(i); };
         engine.onBeforeSlotRemoved = [this](juce::uint32 uid)
@@ -2356,7 +2368,7 @@ public:
 
     void paintOverChildren(juce::Graphics& g) override
     {
-        if (editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
+        if (splash != nullptr || editorHost.isVisible() || inputsPanel.isVisible() || showsPanel.isVisible() || patchPanel.isVisible() || midiPanel.isVisible())
             return;
 
         // Magnifier icon inside the search box
@@ -2441,9 +2453,18 @@ public:
             layoutTabs();
         }
 
-        auto racksCol = r.removeFromRight(editing ? juce::jlimit(180, 210, r.getWidth() / 6)
-                                                  : juce::jlimit(200, 260, r.getWidth() / 4));
-        r.removeFromRight(16);
+        const bool compact = editing && editorCompact;     // racks column steps aside too, for a big plugin
+        juce::Rectangle<int> racksCol;
+        if (! compact)
+        {
+            racksCol = r.removeFromRight(editing ? juce::jlimit(180, 210, r.getWidth() / 6)
+                                                 : juce::jlimit(200, 260, r.getWidth() / 4));
+            r.removeFromRight(16);
+        }
+        for (auto* c : std::initializer_list<juce::Component*> { &racksTitle, &addRackBtn, &removeRackBtn, &groupsBtn, &racksList,
+                                                                  &rackStripLabel, &masterLabel, &inMeter, &meter, &rackFader,
+                                                                  &masterMeter, &masterFader })
+            c->setVisible(! compact);
 
         // While a plugin is open, the plugin library gives way to the rack's chain (like a hardware
         // rack: the chain on one side, the open plugin in the middle).
@@ -2531,6 +2552,14 @@ public:
         outCombo.setBounds(patchRow);
         chainArea.removeFromTop(6);
         rackList.setBounds(chainArea);
+
+        if (compact)
+        {
+            racksPanel = {};
+            mixerPanel = {};
+            layoutHotChips();
+            return;
+        }
 
         racksTitle.setBounds(racksCol.removeFromTop(24));
         auto rackBtns = racksCol.removeFromTop(32);
@@ -3076,6 +3105,8 @@ private:
             c->setVisible(x + w <= right);
             x += w + 8;
         }
+        if (splash != nullptr)
+            splash->toFront(false);          // chips are created after the splash: keep it on top
     }
 
     void afterHotChanged()
@@ -3864,6 +3895,8 @@ private:
     // Twice a second: refresh the audio device / CPU line in the status bar.
     void timerCallback() override
     {
+        if (splash != nullptr)
+            splash->toFront(false);
         juce::String s;
         if (! engine.ownsAudioDevice())
         {
@@ -3937,33 +3970,43 @@ private:
         if (row < 0 || row >= engine.getNumSlots())
             return;
 
-        if (! editorHost.isVisible())
-        {
-            preEditorW = getWidth();
-            preEditorH = getHeight();
-        }
-
         auto& slot = engine.getSlot(row);
         inlineNode = slot.node->nodeID.uid;
         editorHost.setVisible(true);
         resized();                                  // makes room: the chain moves left, the plugin goes in the middle
         editorHost.show(*slot.node->getProcessor(), slot.desc.name, slot.desc.createIdentifierString());
         resized();
-
-        // Not enough room even after the window has grown as far as the screen allows: give the plugin
-        // its own window rather than let it spill over the rest of the interface.
-        // (Checked a moment later, once the window has finished resizing.)
-        const auto uid = inlineNode;
-        juce::Component::SafePointer<MainComponent> safe(this);
-        juce::Timer::callAfterDelay(350, [safe, row, uid]
-        {
-            if (safe != nullptr && safe->inlineNode == uid && safe->editorHost.isVisible() && safe->editorHost.tooBig())
-            {
-                safe->closeInlineEditor(true);
-                safe->engine.openEditor(row, true);
-            }
-        });
+        ensureEditorFits();
         repaint();
+    }
+
+    int inlineRowIndex() const
+    {
+        for (int i = 0; i < engine.getNumSlots(); ++i)
+            if (engine.getSlot(i).node->nodeID.uid == inlineNode)
+                return i;
+        return -1;
+    }
+
+    // A plugin must never spill over the rest of the interface. If it is too big for the room, first
+    // give it the racks column's space too; if it is still too big, it gets a window of its own.
+    void ensureEditorFits()
+    {
+        if (! editorHost.isVisible() || ! editorHost.tooBig())
+            return;
+
+        if (! editorCompact)
+        {
+            editorCompact = true;
+            resized();
+            if (! editorHost.tooBig())
+                return;
+        }
+
+        const int row = inlineRowIndex();
+        closeInlineEditor(false);
+        if (row >= 0)
+            engine.openEditor(row, true);
     }
 
     // restoreSize: put the window back to its size from before the editor opened.
@@ -4006,15 +4049,13 @@ private:
 
     void closeInlineEditor(bool restoreSize)
     {
-        const bool wasOpen = editorHost.isVisible();
+        juce::ignoreUnused(restoreSize);
         editorHost.clear();
         editorHost.setVisible(false);
         inlineNode = 0;
+        editorCompact = false;
         resized();
         repaint();
-
-        if (wasOpen && restoreSize && onRequestSize)
-            onRequestSize(preEditorW, preEditorH);
     }
 
     void showAudioSettings()
@@ -4278,7 +4319,7 @@ private:
     InlineEditorHost editorHost;
     std::unique_ptr<juce::FileChooser> imageChooser;
     juce::uint32 inlineNode = 0;
-    int preEditorW = 1180, preEditorH = 720;
+    bool editorCompact = false;
     juce::File pluginListFile, deadMansFile;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::TooltipWindow tooltipWindow { this, 700 };
