@@ -378,7 +378,7 @@ public:
         addAndMakeVisible(title);
 
         viewport.setViewedComponent(&holder, false);
-        viewport.setScrollBarsShown(false, false);      // never scrolled: a plugin that does not fit gets its own window
+        viewport.setScrollBarsShown(true, true);        // a plugin bigger than the room scrolls; it always stays inside the client
         addAndMakeVisible(viewport);
     }
 
@@ -3988,8 +3988,8 @@ private:
         return -1;
     }
 
-    // A plugin must never spill over the rest of the interface. If it is too big for the room, first
-    // give it the racks column's space too; if it is still too big, it gets a window of its own.
+    // A plugin always stays inside the client. If it is too big for the room, the racks column steps
+    // aside to give it more; if it is still too big, the panel scrolls.
     void ensureEditorFits()
     {
         if (! editorHost.isVisible() || ! editorHost.tooBig())
@@ -3999,14 +3999,7 @@ private:
         {
             editorCompact = true;
             resized();
-            if (! editorHost.tooBig())
-                return;
         }
-
-        const int row = inlineRowIndex();
-        closeInlineEditor(false);
-        if (row >= 0)
-            engine.openEditor(row, true);
     }
 
     // restoreSize: put the window back to its size from before the editor opened.
