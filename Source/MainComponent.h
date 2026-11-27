@@ -191,7 +191,6 @@ public:
         const auto thumb = PluginImages::get(imageId);
         const bool narrow = getWidth() < 420;       // in the chain column beside an open plugin
         int textX = 66;
-        if (thumb.isValid())
         {
             const float boxH = narrow ? 34.0f : (float) getHeight() - 16.0f;
             const float boxW = narrow ? 54.0f : juce::jmin(112.0f, boxH * 1.6f);
@@ -203,7 +202,23 @@ public:
             clip.addRoundedRectangle(box, 5.0f);
             g.reduceClipRegion(clip);
             g.setOpacity(bypassed ? 0.4f : 1.0f);
-            g.drawImage(thumb, box, juce::RectanglePlacement::centred);
+            if (thumb.isValid())
+                g.drawImage(thumb, box, juce::RectanglePlacement::centred);
+            else
+            {
+                // No picture of the editor could be taken (GPU / native windows): a tile in the plugin's
+                // colour with its initials. Right-click the row to choose a picture instead.
+                const auto c = Theme::tint(name);
+                g.setGradientFill(juce::ColourGradient(c.withAlpha(0.55f), box.getX(), box.getY(),
+                                                       c.darker(0.8f).withAlpha(0.9f), box.getRight(), box.getBottom(), false));
+                g.fillRect(box);
+                juce::String ini;
+                for (auto& w : juce::StringArray::fromTokens(name, " -_", ""))
+                    if (w.isNotEmpty() && ini.length() < 2) ini << w.substring(0, 1).toUpperCase();
+                g.setColour(juce::Colours::white.withAlpha(0.9f));
+                g.setFont(juce::FontOptions(juce::jmin(22.0f, boxH * 0.5f), juce::Font::bold));
+                g.drawText(ini, box, juce::Justification::centred);
+            }
             g.restoreState();
             g.setColour(Theme::outline());
             g.drawRoundedRectangle(box, 5.0f, 1.0f);
